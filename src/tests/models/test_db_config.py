@@ -60,13 +60,16 @@ def test_get_settings_loads_custom_props_success(mock_open_file, mock_exists):
 
 
 @patch('os.path.exists', return_value=False)
-def test_get_settings_file_not_found(mock_exists, capsys):
+def test_get_settings_file_not_found(mock_exists, caplog):
     """
     Case 2: .weaviate_properties file does not exist
     - settings.custom_properties should be None
-    - A 'file not found' note should be printed
+    - A 'file not found' message should be logged at DEBUG level
     """
+    import logging
+
     # Arrange
+    caplog.set_level(logging.DEBUG)  # DEBUG 레벨로 설정 (중요!)
     get_weaviate_settings.cache_clear()
 
     # Act
@@ -76,21 +79,23 @@ def test_get_settings_file_not_found(mock_exists, capsys):
     mock_exists.assert_called_with(".weaviate_properties")
     assert settings.custom_properties is None
 
-    # Check if 'file not found' note was printed
-    captured = capsys.readouterr()
-    assert "file not found" in captured.out
+    # Check if 'file not found' message was logged
+    assert "file not found" in caplog.text.lower() or "not found" in caplog.text
 
 
 @patch('os.path.exists', return_value=True)
 @patch('builtins.open', new_callable=mock_open, read_data=MOCK_INVALID_JSON)
 @patch('json.load', side_effect=JSONDecodeError("Mock JSON Decode Error", "", 0))
-def test_get_settings_invalid_json(mock_json_load, mock_open_file, mock_exists, capsys):
+def test_get_settings_invalid_json(mock_json_load, mock_open_file, mock_exists, caplog):
     """
     Case 3: File exists but JSON format is invalid
     - settings.custom_properties should be None
-    - A 'Could not parse JSON' warning should be printed
+    - A 'Could not parse JSON' warning should be logged
     """
+    import logging
+
     # Arrange
+    caplog.set_level(logging.WARNING)
     get_weaviate_settings.cache_clear()
 
     # Act
@@ -99,12 +104,16 @@ def test_get_settings_invalid_json(mock_json_load, mock_open_file, mock_exists, 
     # Assert
     mock_exists.assert_called_once()
     mock_open_file.assert_called_once()
-    mock_json_load.assert_called_once() # json.load was called but failed (due to side_effect)
-    assert settings.custom_properties is None # Should be None due to parsing failure
+    mock_json_load.assert_called_once()  # json.load was called but failed (due to side_effect)
+    assert settings.custom_properties is None  # Should be None due to parsing failure
 
-    # Check if 'Could not parse JSON' warning was printed
-    captured = capsys.readouterr()
-    assert "Could not parse JSON" in captured.out
+    # Check if 'Could not parse JSON' warning was logged
+    assert "Could not parse JSON" in caplog.text
+
+    # Also check the log level
+    warning_logs = [r for r in caplog.records if "parse JSON" in r.message]
+    assert len(warning_logs) > 0
+    assert warning_logs[0].levelname == "WARNING"
 
 @patch('os.path.exists', return_value=True)
 @patch('builtins.open', new_callable=mock_open, read_data=MOCK_JSON_DATA)
