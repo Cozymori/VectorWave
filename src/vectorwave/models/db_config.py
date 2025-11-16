@@ -41,6 +41,10 @@ class WeaviateSettings(BaseSettings):
     global_custom_values: Optional[Dict[str, Any]] = None
     failure_mapping: Optional[Dict[str, str]] = None
 
+    ALERTER_STRATEGY: str = "none"
+    ALERTER_WEBHOOK_URL: Optional[str] = None
+    ALERTER_MIN_LEVEL: str = "ERROR" 
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8",extra='ignore')
 
 
