@@ -26,7 +26,8 @@ classifiers = [
 dependencies = [
     "weaviate-client>=4.0.0",
     "pydantic-settings>=2.0.0",
-    "sentence-transformers"
+    "sentence-transformers",
+    "requests"
 ]
 
 [project.urls]
