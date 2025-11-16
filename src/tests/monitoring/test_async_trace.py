@@ -23,6 +23,7 @@ async def test_trace_root_and_span_async_success(mock_tracer_deps):
     - ContextVar (trace_id) must be correctly propagated across 'await' boundaries
     '''
     mock_batch = mock_tracer_deps["batch"]
+    mock_alerter = mock_tracer_deps["alerter"]
 
     @trace_span(attributes_to_capture=['x'])
     async def my_async_inner_span(x):
@@ -37,6 +38,7 @@ async def test_trace_root_and_span_async_success(mock_tracer_deps):
         return result
 
     mock_batch.reset_mock()
+    mock_alerter.reset_mock()
 
     # --- Execution ---
     result = await my_async_workflow_root()
@@ -46,6 +48,8 @@ async def test_trace_root_and_span_async_success(mock_tracer_deps):
 
     # 2 calls expected: 1 (inner_span) + 1 (workflow_root)
     assert mock_batch.add_object.call_count == 2
+
+    mock_alerter.notify.assert_not_called()
 
     call_args_list = mock_batch.add_object.call_args_list
     props_map = {
@@ -80,9 +84,12 @@ async def test_trace_span_async_failure(mock_tracer_deps):
     Case 2: Async span failure test
     '''
     mock_batch = mock_tracer_deps["batch"]
+    mock_alerter = mock_tracer_deps["alerter"]
 
     class AsyncTestError(Exception):
-        pass
+        @property
+        def error_code(self):
+            return "ASYNC_TEST_FAILURE"
 
     @trace_span
     async def my_failing_async_span():
@@ -96,6 +103,20 @@ async def test_trace_span_async_failure(mock_tracer_deps):
     # --- Execution and Verification (Exception) ---
     with pytest.raises(AsyncTestError, match="Async failure test"):
         await my_async_workflow_fail()
+
+    mock_alerter.notify.assert_called_once()
+    alert_props = mock_alerter.notify.call_args.args[0]
+
+    assert alert_props["status"] == "ERROR"
+    assert "AsyncTestError: Async failure test" in alert_props["error_message"]
+    assert alert_props["function_name"] == "my_failing_async_span"
+    assert alert_props["error_code"] == "ASYNC_TEST_FAILURE"
+
+    mock_batch.add_object.assert_called_once()
+    db_props = mock_batch.add_object.call_args.kwargs["properties"]
+
+    assert db_props == alert_props
+    assert db_props["span_id"] == alert_props["span_id"]
 
     # --- Verification (Log) ---
     # Check if the failed span log was recorded
@@ -116,6 +137,7 @@ async def test_span_without_root_async_does_nothing(mock_tracer_deps):
     Case 3: Async span called without a root (@trace_root) should not be logged
     '''
     mock_batch = mock_tracer_deps["batch"]
+    mock_alerter = mock_tracer_deps["alerter"]
 
     @trace_span
     async def my_lonely_async_span():
@@ -126,6 +148,7 @@ async def test_span_without_root_async_does_nothing(mock_tracer_deps):
 
     assert result == "lonely_result"
     mock_batch.add_object.assert_not_called()
+    mock_alerter.notify.assert_not_called()
 
 
 # ==================================

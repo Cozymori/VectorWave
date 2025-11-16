@@ -10,6 +10,7 @@ from vectorwave.batch.batch import get_batch_manager as real_get_batch_manager
 from vectorwave.database.db import get_cached_client as real_get_cached_client
 from vectorwave.models.db_config import get_weaviate_settings as real_get_settings
 from vectorwave.monitoring.tracer import TraceCollector, current_tracer_var
+from vectorwave.monitoring.alert.base import BaseAlerter
 
 # Module paths to mock (adjust to your project structure if needed)
 TRACER_MODULE_PATH = "vectorwave.monitoring.tracer"
@@ -42,12 +43,17 @@ def mock_tracer_deps(monkeypatch):
     )
     mock_get_settings = MagicMock(return_value=mock_settings)
 
+    mock_alerter_instance = MagicMock(spec=BaseAlerter)
+    mock_alerter_instance.notify = MagicMock()
+    mock_get_alerter = MagicMock(return_value=mock_alerter_instance)
+
     mock_client = MagicMock()
     mock_get_client = MagicMock(return_value=mock_client)
 
     # --- Patch dependencies for tracer.py ---
     monkeypatch.setattr(f"{TRACER_MODULE_PATH}.get_batch_manager", mock_get_batch_manager)
     monkeypatch.setattr(f"{TRACER_MODULE_PATH}.get_weaviate_settings", mock_get_settings)
+    monkeypatch.setattr(f"{TRACER_MODULE_PATH}.get_alerter", mock_get_alerter)
 
     # Patch dependencies inside batch.py to prevent BatchManager init failure
     monkeypatch.setattr(f"{BATCH_MODULE_PATH}.get_weaviate_client", mock_get_client)
@@ -60,7 +66,8 @@ def mock_tracer_deps(monkeypatch):
 
     return {
         "batch": mock_batch_instance,
-        "settings": mock_settings
+        "settings": mock_settings,
+        "alerter": mock_alerter_instance
     }
 
 
@@ -69,6 +76,7 @@ def test_trace_root_and_span_success(mock_tracer_deps):
     Case 1: Success (Root + Span) - The span should be recorded successfully.
     """
     mock_batch = mock_tracer_deps["batch"]
+    mock_alerter = mock_tracer_deps["alerter"]
 
     @trace_span
     def my_inner_span(x):
@@ -84,6 +92,7 @@ def test_trace_root_and_span_success(mock_tracer_deps):
     # --- Assert ---
     assert result == "result: 10"
     mock_batch.add_object.assert_called_once()
+    mock_alerter.notify.assert_not_called()
 
     args, kwargs = mock_batch.add_object.call_args
     props = kwargs["properties"]
@@ -103,6 +112,7 @@ def test_trace_span_failure(mock_tracer_deps):
     Case 2: Failure (Root + Failing Span) - The span should be recorded with an ERROR status.
     """
     mock_batch = mock_tracer_deps["batch"]
+    mock_alerter = mock_tracer_deps["alerter"]
 
     @trace_span
     def my_failing_span():
@@ -118,10 +128,21 @@ def test_trace_span_failure(mock_tracer_deps):
 
     # --- Assert (Log) ---
     mock_batch.add_object.assert_called_once()
+    db_props = mock_batch.add_object.call_args.kwargs["properties"]
+    assert db_props["status"] == "ERROR"
+    assert "ValueError: This is a test error" in db_props["error_message"]
+    assert db_props["error_code"] == "INVALID_INPUT"
+
+    mock_alerter.notify.assert_called_once()
+    alert_props = mock_alerter.notify.call_args.args[0]
 
     args, kwargs = mock_batch.add_object.call_args
     props = kwargs["properties"]
 
+
+    assert alert_props == db_props
+    assert alert_props["status"] == "ERROR"
+    assert alert_props["error_code"] == "INVALID_INPUT"
     assert props["status"] == "ERROR"
     assert "ValueError: This is a test error" in props["error_message"]
     assert kwargs["properties"]["error_code"] == "INVALID_INPUT"
