@@ -12,6 +12,7 @@ from .alert.base import BaseAlerter
 from ..batch.batch import get_batch_manager
 from ..models.db_config import get_weaviate_settings, WeaviateSettings
 from .alert.factory import get_alerter
+from ..vectorizer.factory import get_vectorizer
 
 # Create module-level logger
 logger = logging.getLogger(__name__)
@@ -180,6 +181,7 @@ def trace_span(
                 error_code = None
                 result = None
                 span_properties = None
+                vector_to_add: Optional[List[float]] = None
 
                 captured_attributes = _capture_span_attributes(
                     attributes_to_capture, kwargs, func.__name__
@@ -196,6 +198,14 @@ def trace_span(
                         tracer, func, start_time, status, error_msg, error_code, captured_attributes, my_span_id=my_span_id,
                         parent_span_id=parent_span_id
                     )
+
+                    try:
+                        vectorizer = get_vectorizer()
+                        if vectorizer:
+                            simple_error_msg = str(e)
+                            vector_to_add = vectorizer.embed(simple_error_msg)
+                    except Exception as ve:
+                        logger.warning(f"Failed to vectorize error message for '{func.__name__}': {ve}")
 
                     try:
                         if not tracer.alert_sent:
@@ -217,7 +227,8 @@ def trace_span(
                         try:
                             tracer.batch.add_object(
                                 collection=tracer.settings.EXECUTION_COLLECTION_NAME,
-                                properties=span_properties
+                                properties=span_properties,
+                                vector=vector_to_add
                             )
                         except Exception as e:
                             logger.error("Failed to log span for '%s' (trace_id: %s): %s", func.__name__,
@@ -246,6 +257,7 @@ def trace_span(
                 error_code = None
                 result = None
                 span_properties = None
+                vector_to_add: Optional[List[float]] = None
 
                 captured_attributes = _capture_span_attributes(
                     attributes_to_capture, kwargs, func.__name__
@@ -262,6 +274,14 @@ def trace_span(
                         tracer, func, start_time, status, error_msg, error_code, captured_attributes, my_span_id=my_span_id,
                         parent_span_id=parent_span_id
                     )
+
+                    try:
+                        vectorizer = get_vectorizer()
+                        if vectorizer:
+                            simple_error_msg = str(e)
+                            vector_to_add = vectorizer.embed(simple_error_msg)
+                    except Exception as ve:
+                        logger.warning(f"Failed to vectorize error message for '{func.__name__}': {ve}")
 
                     try:
                         if not tracer.alert_sent:
@@ -283,7 +303,8 @@ def trace_span(
                         try:
                             tracer.batch.add_object(
                                 collection=tracer.settings.EXECUTION_COLLECTION_NAME,
-                                properties=span_properties
+                                properties=span_properties,
+                                vector=vector_to_add
                             )
                         except Exception as e:
                             logger.error("Failed to log span for '%s' (trace_id: %s): %s", func.__name__,
