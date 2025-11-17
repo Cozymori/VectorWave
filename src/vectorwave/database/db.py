@@ -239,6 +239,11 @@ def create_execution_schema(client: weaviate.WeaviateClient, settings: WeaviateS
             description="The unique ID for this specific span/function execution"
         ),
         wvc.Property(
+            name="parent_span_id",
+            data_type=wvc.DataType.TEXT,
+            description="The span_id of the parent function that called this span"
+        ),
+        wvc.Property(
             name="function_name",
             data_type=wvc.DataType.TEXT,
             description="Name of the executed function (span name)"
