@@ -10,6 +10,7 @@ from ..batch.batch import get_batch_manager
 from ..models.db_config import get_weaviate_settings
 from ..monitoring.tracer import trace_root, trace_span
 from ..vectorizer.factory import get_vectorizer
+from ..utils.function_cache import function_cache_manager
 
 # Create module-level logger
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ def vectorize(search_description: str,
 
         func_uuid = None
         valid_execution_tags = {}
+
         try:
             module_name = func.__module__
             function_name = func.__name__
@@ -44,18 +46,7 @@ def vectorize(search_description: str,
                 "sequence_narrative": sequence_narrative
             }
 
-            batch = get_batch_manager()
             settings = get_weaviate_settings()
-
-            vectorizer = get_vectorizer()
-            vector_to_add = None
-
-            if vectorizer:
-                try:
-                    logger.info(f"Vectorizing '{function_name}' using Python vectorizer...")
-                    vector_to_add = vectorizer.embed(search_description)
-                except Exception as e:
-                    logger.warning(f"Failed to vectorize '{function_name}' with Python client: {e}")
 
             if execution_tags:
                 if not settings.custom_properties:
@@ -78,12 +69,37 @@ def vectorize(search_description: str,
 
             static_properties.update(valid_execution_tags)
 
-            batch.add_object(
-                collection=settings.COLLECTION_NAME,
-                properties=static_properties,
-                uuid=func_uuid,
-                vector=vector_to_add
-            )
+            # 2. contents hash
+            current_content_hash = function_cache_manager.calculate_content_hash(func_identifier, static_properties)
+
+            # 3. check hash
+            if function_cache_manager.is_cached_and_unchanged(func_uuid, current_content_hash):
+                # if not changed jump db writing.
+                logger.info(f"Function '{function_name}' (UUID: {func_uuid[:8]}...) is UNCHANGED. Skipping DB write.")
+            else:
+                # if hash changed or new function db write
+                logger.info(f"Function '{function_name}' (UUID: {func_uuid[:8]}...) is NEW or CHANGED. Writing to DB.")
+
+                batch = get_batch_manager()
+                vectorizer = get_vectorizer()
+                vector_to_add = None
+
+                if vectorizer:
+                    try:
+                        logger.info(f"Vectorizing '{function_name}' using Python vectorizer...")
+                        vector_to_add = vectorizer.embed(search_description)
+                    except Exception as e:
+                        logger.warning(f"Failed to vectorize '{function_name}' with Python client: {e}")
+
+                batch.add_object(
+                    collection=settings.COLLECTION_NAME,
+                    properties=static_properties,
+                    uuid=func_uuid,
+                    vector=vector_to_add
+                )
+
+                # 4. update cash
+                function_cache_manager.update_cache(func_uuid, current_content_hash)
 
         except Exception as e:
             logger.error("Error in @vectorize setup for '%s': %s", func.__name__, e)
@@ -114,7 +130,6 @@ def vectorize(search_description: str,
                 for key in keys_to_remove:
                     original_kwargs.pop(key, None)
 
-                # [MODIFIED] await 사용
                 return await func(*args, **original_kwargs)
 
             @wraps(func)
@@ -123,12 +138,11 @@ def vectorize(search_description: str,
                 full_kwargs.update(valid_execution_tags)
                 full_kwargs['function_uuid'] = func_uuid
 
-                # [MODIFIED] await 사용
                 return await inner_wrapper(*args, **full_kwargs)
 
             return outer_wrapper
 
-        else:
+        else:  # original sync logic
 
             @trace_root()
             @trace_span(attributes_to_capture=['function_uuid', 'team', 'priority', 'run_id'])
