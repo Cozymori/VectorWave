@@ -20,7 +20,7 @@ try:
 
     # (RAG Search) Import low-level function
     #
-    from vectorwave.database.db_search import search_functions
+    from vectorwave.database.db_search import search_functions, search_errors_by_message
 
     # (New) Import high-level execution log search functions
     #
@@ -37,8 +37,7 @@ except ImportError as e:
 
 
 # Logging setup removed
-# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-# logger = logging.getLogger(__name__)
+# ...
 
 def run_search_scenarios():
     """
@@ -100,10 +99,34 @@ def run_search_scenarios():
         else:
             print("  -> 'process_payment' log not found. (Run example.py first)")
 
+        # --- [NEW] Scenario 5: Semantic Error Search ---
+        print("\n" + "=" * 50)
+        print("--- [Scenario 5: Semantic Error Search (Vector)] ---")
+        print("=" * 50)
+        error_query = "problem with negative amount" 
+        print(f"Query: '{error_query}'")
+
+        try:
+            similar_errors = search_errors_by_message(query=error_query, limit=3)
+
+            if not similar_errors:
+                print("  -> No semantically similar errors found.")
+                print("     (Run example.py to generate errors, and ensure .env uses a Python-based vectorizer like 'huggingface' or 'openai_client')")
+            for i, err in enumerate(similar_errors):
+                full_error_msg = err['properties'].get('error_message', 'N/A')
+                simple_msg = full_error_msg.strip().split('\n')[-1]
+
+                print(f"  [Error Result {i + 1}] (Distance: {err['metadata'].distance:.4f})")
+                print(f"  Function: {err['properties']['function_name']}")
+                print(f"  Message: {simple_msg}")
+
+        except Exception as e:
+            print(f"  [Error] Semantic search failed: {e}")
+            print("  (Note: This search requires .env VECTORIZER to be 'huggingface' or 'openai_client')")
+
     except Exception as e:
-        print(f"A fatal error occurred during scenario execution: {e}")
+        print(f"AFatal error occurred during scenario execution: {e}")
     finally:
-        # --- 8. Close Connection ---
         client = get_cached_client()
         if client:
             client.close()
