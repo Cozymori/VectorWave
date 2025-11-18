@@ -1,8 +1,11 @@
 import pytest
 from unittest.mock import MagicMock
+import json
+from datetime import datetime
 import time
 
-from vectorwave.monitoring.tracer import trace_root, trace_span
+from vectorwave.monitoring.tracer import trace_root, trace_span, _mask_and_serialize
+
 from vectorwave.models.db_config import WeaviateSettings
 
 # --- Import real functions for cache clearing ---
@@ -39,7 +42,8 @@ def mock_tracer_deps(monkeypatch):
         EXECUTION_COLLECTION_NAME="TestExecutions",
         custom_properties=None,  # Not important for this test
         global_custom_values={"run_id": "global-run-abc", "env": "test"},
-        failure_mapping={"ValueError": "INVALID_INPUT"}
+        failure_mapping={"ValueError": "INVALID_INPUT"},
+        sensitive_keys={"password", "token", "api_key"}
     )
     mock_get_settings = MagicMock(return_value=mock_settings)
 
@@ -206,8 +210,8 @@ def test_span_captures_attributes_and_overrides_globals(mock_tracer_deps):
     class MyObject:
         def __str__(self): return "MyObjectInstance"
 
-    @trace_span(attributes_to_capture=["team", "priority", "run_id", "user_obj"])
-    def my_span_with_attrs(team, priority, run_id, user_obj, other_arg="default"):
+    @trace_span(attributes_to_capture=["team", "priority", "run_id", "user_obj", "password"])
+    def my_span_with_attrs(team, priority, run_id, user_obj, password, other_arg="default"):
         return "captured"
 
     @trace_root()
@@ -218,7 +222,8 @@ def test_span_captures_attributes_and_overrides_globals(mock_tracer_deps):
             priority=1,
             run_id="override-run-xyz",  # <-- This should override "global-run-abc"
             user_obj=MyObject(),
-            other_arg="should-be-ignored"
+            other_arg="should-be-ignored",
+            password="my_secret_password_123"
         )
 
     # --- Act ---
@@ -245,6 +250,9 @@ def test_span_captures_attributes_and_overrides_globals(mock_tracer_deps):
     assert child_props["run_id"] == "override-run-xyz"  # Overridden
     assert child_props["env"] == "test"  # Non-overridden global remains
     assert "other_arg" not in child_props
+
+    assert "password" in child_props
+    assert child_props["password"] == "[MASKED]"
 
 
 def test_root_accepts_custom_trace_id(mock_tracer_deps):
@@ -329,7 +337,6 @@ def test_trace_span_error_code_priority_3_default_class_name(mock_tracer_deps):
     def my_key_error_function():
         _ = {}["missing_key"]  # Raises KeyError
 
-    # [NEW] Set up mock parent context
     tracer_token = current_tracer_var.set(tracer)
     parent_span_token = current_span_id_var.set("mock-parent-id-456")
 
