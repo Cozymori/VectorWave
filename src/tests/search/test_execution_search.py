@@ -66,17 +66,22 @@ MockDateTime.fromisoformat = MagicMock(side_effect=datetime.fromisoformat)
 
 
 @patch('vectorwave.search.execution_search.datetime', MockDateTime)
-@patch('vectorwave.search.execution_search.find_executions', MagicMock(return_value=mock_db_errors))
-def test_find_recent_errors():
+@patch('vectorwave.search.execution_search.find_executions')
+def test_find_recent_errors(mock_find_executions):
     """
-    Tests if find_recent_errors (including manual filtering) works correctly.
+    Tests if find_recent_errors calls find_executions with the correct filters.
+    (The test no longer checks manual filtering, as filtering is delegated to the DB).
     """
     # 1. Run test
-    result = find_recent_errors(minutes_ago=10, error_codes=["INVALID_INPUT"])
+    find_recent_errors(minutes_ago=10, error_codes=["INVALID_INPUT"])
 
-    # 2. Verify result (if manual filtering worked correctly)
-    assert len(result) == 1  # Logs from 15 minutes ago should be filtered out
-    assert result[0]["error_code"] == "INVALID_INPUT"
+    # 2. Verify find_executions was called correctly
+    call_args = mock_find_executions.call_args
+    filters_arg = call_args.kwargs['filters']
+
+    assert filters_arg['status'] == 'ERROR'
+    assert filters_arg['error_code'] == 'INVALID_INPUT'
+    assert filters_arg['timestamp_utc__gte'] == expected_time_limit_iso
 
 
 @patch('vectorwave.search.execution_search.find_executions')
