@@ -29,8 +29,8 @@ class WeaviateBatchManager:
         self.queue = queue.Queue(maxsize=10000)
 
         # --- 2. Batch Configuration ---
-        self.batch_threshold = 20      # Flush if 20 items gathered
-        self.flush_interval = 2.0      # Flush every 2.0 seconds even if not full
+        self.batch_threshold = self.settings.BATCH_THRESHOLD
+        self.flush_interval = self.settings.FLUSH_INTERVAL_SECONDS
 
         # --- 3. Control Flags ---
         self._stop_event = threading.Event()

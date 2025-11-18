@@ -8,6 +8,7 @@ import os
 # Create module-level logger
 logger = logging.getLogger(__name__)
 
+
 class WeaviateSettings(BaseSettings):
     """
     Manages Weaviate database connection settings.
@@ -26,6 +27,9 @@ class WeaviateSettings(BaseSettings):
     # "weaviate_module", "huggingface", "openai_client", "none"
     VECTORIZER: str = "weaviate_module"
 
+    # batch configs
+    BATCH_THRESHOLD: int = 20
+    FLUSH_INTERVAL_SECONDS: float = 2.0
 
     WEAVIATE_VECTORIZER_MODULE: str = "text2vec-openai"
 
@@ -48,7 +52,7 @@ class WeaviateSettings(BaseSettings):
     SENSITIVE_FIELD_NAMES: str = "password,api_key,token,secret,auth_token"
     sensitive_keys: Set[str] = set()
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8",extra='ignore')
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra='ignore')
 
 
 # @lru_cache ensures this function creates the Settings object only once (Singleton pattern)
@@ -109,7 +113,8 @@ def get_weaviate_settings() -> WeaviateSettings:
                 if isinstance(loaded_data, dict):
                     settings.failure_mapping = loaded_data
                 else:
-                    logger.warning(f"Content in '{error_file_path}' is not a valid dictionary. Skipping failure mapping.")
+                    logger.warning(
+                        f"Content in '{error_file_path}' is not a valid dictionary. Skipping failure mapping.")
         except Exception as e:
             logger.warning(f"Could not read or parse '{error_file_path}': {e}")
     elif error_file_path:
