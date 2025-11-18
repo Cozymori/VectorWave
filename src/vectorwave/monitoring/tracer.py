@@ -2,6 +2,7 @@ import logging
 import inspect
 import time
 import traceback
+import json
 from functools import wraps
 from contextvars import ContextVar
 from typing import Optional, List, Dict, Any, Callable
@@ -31,10 +32,36 @@ current_tracer_var: ContextVar[Optional[TraceCollector]] = ContextVar('current_t
 current_span_id_var: ContextVar[Optional[str]] = ContextVar('current_span_id', default=None)
 
 
+def _mask_and_serialize(data: Any, sensitive_keys: set) -> Any:
+    """
+    Recursively masks sensitive data in dicts/lists and prepares for serialization.
+    """
+    if isinstance(data, dict):
+        new_dict = {}
+        for k, v in data.items():
+            if str(k).lower() in sensitive_keys:
+                new_dict[k] = "[MASKED]"
+            else:
+                new_dict[k] = _mask_and_serialize(v, sensitive_keys)
+        return new_dict
+
+    if isinstance(data, list):
+        return [_mask_and_serialize(item, sensitive_keys) for item in data]
+
+    if not isinstance(data, (str, int, float, bool, type(None))):
+        try:
+            return str(data)
+        except Exception:
+            return "[SERIALIZATION_ERROR]"
+
+    return data
+
+
 def _capture_span_attributes(
         attributes_to_capture: Optional[List[str]],
         kwargs: Dict[str, Any],
-        func_name: str
+        func_name: str,
+        sensitive_keys: set
 ) -> Dict[str, Any]:
     captured_attributes = {}
     if not attributes_to_capture:
@@ -43,10 +70,14 @@ def _capture_span_attributes(
     try:
         for attr_name in attributes_to_capture:
             if attr_name in kwargs:
-                value = kwargs[attr_name]
-                if not isinstance(value, (str, int, float, bool, list, dict, type(None))):
-                    value = str(value)
-                captured_attributes[attr_name] = value
+                if attr_name.lower() in sensitive_keys:
+                    processed_value = "[MASKED]"
+                else:
+                    raw_value = kwargs[attr_name]
+                    processed_value = _mask_and_serialize(raw_value, sensitive_keys)
+
+                captured_attributes[attr_name] = processed_value
+
     except Exception as e:
         logger.warning("Failed to capture attributes for '%s': %s", func_name, e)
 
@@ -82,9 +113,19 @@ def _create_span_properties(
         error_code: Optional[str],
         captured_attributes: Dict[str, Any],
         my_span_id: str,
-        parent_span_id: Optional[str]
+        parent_span_id: Optional[str],
+        capture_return_value: bool,
+        result: Optional[Any],
 ) -> Dict[str, Any]:
     duration_ms = (time.perf_counter() - start_time) * 1000
+
+    return_value_to_log = None
+    if capture_return_value and status == "SUCCESS" and result is not None:
+        if not isinstance(result, (str, int, float, bool, list, dict, type(None))):
+            return_value_to_log = str(result)
+        else:
+            return_value_to_log = result
+
     span_properties = {
         "trace_id": tracer.trace_id,
         "span_id": my_span_id,
@@ -95,7 +136,9 @@ def _create_span_properties(
         "status": status,
         "error_message": error_msg,
         "error_code": error_code,
+        "return_value": return_value_to_log
     }
+
 
     if tracer.settings.global_custom_values:
         span_properties.update(tracer.settings.global_custom_values)
@@ -141,7 +184,6 @@ def trace_root() -> Callable:
                 token = current_tracer_var.set(tracer)
                 token_span = current_span_id_var.set(None)
 
-
                 try:
                     return func(*args, **kwargs)
                 finally:
@@ -155,7 +197,8 @@ def trace_root() -> Callable:
 def trace_span(
         _func: Optional[Callable] = None,
         *,
-        attributes_to_capture: Optional[List[str]] = None
+        attributes_to_capture: Optional[List[str]] = None,
+        capture_return_value: bool = False
 ) -> Callable:
     """
     Decorator to capture function execution as a 'span'.
@@ -182,21 +225,33 @@ def trace_span(
                 result = None
                 span_properties = None
                 vector_to_add: Optional[List[float]] = None
+                return_value_log: Optional[str] = None
 
                 captured_attributes = _capture_span_attributes(
-                    attributes_to_capture, kwargs, func.__name__
+                    attributes_to_capture, kwargs, func.__name__,tracer.settings.sensitive_keys
                 )
 
                 try:
                     result = await func(*args, **kwargs)
+
+                    if capture_return_value:
+                        processed_result = _mask_and_serialize(result, tracer.settings.sensitive_keys)
+                        try:
+                            return_value_log = json.dumps(processed_result)
+                        except TypeError:
+                            return_value_log = str(processed_result)
+
                 except Exception as e:
                     status = "ERROR"
                     error_msg = traceback.format_exc()
                     error_code = _determine_error_code(tracer, e)
 
                     span_properties = _create_span_properties(
-                        tracer, func, start_time, status, error_msg, error_code, captured_attributes, my_span_id=my_span_id,
-                        parent_span_id=parent_span_id
+                        tracer, func, start_time, status, error_msg, error_code, captured_attributes,
+                        my_span_id=my_span_id,
+                        parent_span_id=parent_span_id,
+                        capture_return_value= capture_return_value,
+                        result= None,
                     )
 
                     try:
@@ -219,8 +274,11 @@ def trace_span(
                 finally:
                     if status == "SUCCESS":
                         span_properties = _create_span_properties(
-                            tracer, func, start_time, status, error_msg, error_code, captured_attributes, my_span_id=my_span_id,
-                            parent_span_id=parent_span_id
+                            tracer, func, start_time, status, error_msg, error_code, captured_attributes,
+                            my_span_id=my_span_id,
+                            parent_span_id=parent_span_id,
+                            capture_return_value= capture_return_value,
+                            result= return_value_log
                         )
 
                     if span_properties:
@@ -258,21 +316,33 @@ def trace_span(
                 result = None
                 span_properties = None
                 vector_to_add: Optional[List[float]] = None
+                return_value_log: Optional[str] = None
 
                 captured_attributes = _capture_span_attributes(
-                    attributes_to_capture, kwargs, func.__name__
+                    attributes_to_capture, kwargs, func.__name__, tracer.settings.sensitive_keys
                 )
 
                 try:
                     result = func(*args, **kwargs)
+
+                    if capture_return_value:
+                        processed_result = _mask_and_serialize(result, tracer.settings.sensitive_keys)
+                        try:
+                            return_value_log = json.dumps(processed_result)
+                        except TypeError:
+                            return_value_log = str(processed_result)
+
                 except Exception as e:
                     status = "ERROR"
                     error_msg = traceback.format_exc()
                     error_code = _determine_error_code(tracer, e)
 
                     span_properties = _create_span_properties(
-                        tracer, func, start_time, status, error_msg, error_code, captured_attributes, my_span_id=my_span_id,
-                        parent_span_id=parent_span_id
+                        tracer, func, start_time, status, error_msg, error_code, captured_attributes,
+                        my_span_id=my_span_id,
+                        parent_span_id=parent_span_id,
+                        capture_return_value= capture_return_value,
+                        result= None
                     )
 
                     try:
@@ -295,8 +365,11 @@ def trace_span(
                 finally:
                     if status == "SUCCESS":
                         span_properties = _create_span_properties(
-                            tracer, func, start_time, status, error_msg, error_code, captured_attributes, my_span_id=my_span_id,
-                            parent_span_id=parent_span_id
+                            tracer, func, start_time, status, error_msg, error_code, captured_attributes,
+                            my_span_id=my_span_id,
+                            parent_span_id=parent_span_id,
+                            capture_return_value= capture_return_value,
+                            result= return_value_log
                         )
 
                     if span_properties:
