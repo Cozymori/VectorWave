@@ -1,18 +1,17 @@
 import logging
+from functools import lru_cache
+
 import weaviate
 import weaviate.classes.config as wvc  # (wvc = Weaviate Classes Config)
-import weaviate.config as wvc_config
-from weaviate.config import AdditionalConfig
-from vectorwave.models.db_config import WeaviateSettings
 from vectorwave.exception.exceptions import (
     WeaviateConnectionError,
     WeaviateNotReadyError,
     SchemaCreationError
 )
-from functools import lru_cache
-from weaviate.exceptions import WeaviateConnectionError as WeaviateClientConnectionError
+from vectorwave.models.db_config import WeaviateSettings
 from vectorwave.models.db_config import get_weaviate_settings
-from vectorwave.vectorizer.factory import get_vectorizer
+from weaviate.config import AdditionalConfig
+from weaviate.exceptions import WeaviateConnectionError as WeaviateClientConnectionError
 
 # Create module-level logger
 logger = logging.getLogger(__name__)
@@ -278,6 +277,11 @@ def create_execution_schema(client: weaviate.WeaviateClient, settings: WeaviateS
             data_type=wvc.DataType.TEXT,
             description="Categorized error code for the failure (e.g., 'INVALID_INPUT', 'TIMEOUT')"
         ),
+        wvc.Property(
+            name="return_value",
+            data_type=wvc.DataType.TEXT,
+            description="The JSON-serialized or str() representation of the function's return value"
+        )
     ]
 
     if settings.custom_properties:
