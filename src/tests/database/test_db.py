@@ -355,6 +355,9 @@ def test_create_execution_schema_new(mock_vectorizer_none, test_settings):
     assert "status" in passed_props_map
     assert "duration_ms" in passed_props_map
 
+    assert "return_value" in passed_props_map
+    assert passed_props_map["return_value"].dataType == wvc.DataType.TEXT
+
     assert collection == mock_new_collection
 
 
