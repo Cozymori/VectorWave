@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 def vectorize(search_description: str,
               sequence_narrative: str,
+              capture_return_value: bool = False,
               **execution_tags):
     """
     VectorWave Decorator
@@ -118,7 +119,8 @@ def vectorize(search_description: str,
         if is_async_func:
 
             @trace_root()
-            @trace_span(attributes_to_capture=['function_uuid', 'team', 'priority', 'run_id'])
+            @trace_span(attributes_to_capture=['function_uuid', 'team', 'priority', 'run_id'],
+                        capture_return_value=capture_return_value)
             @wraps(func)
             async def inner_wrapper(*args, **kwargs):
                 original_kwargs = kwargs.copy()
@@ -145,7 +147,8 @@ def vectorize(search_description: str,
         else:  # original sync logic
 
             @trace_root()
-            @trace_span(attributes_to_capture=['function_uuid', 'team', 'priority', 'run_id'])
+            @trace_span(attributes_to_capture=['function_uuid', 'team', 'priority', 'run_id'],
+                        capture_return_value=capture_return_value)
             @wraps(func)
             def inner_wrapper(*args, **kwargs):
                 original_kwargs = kwargs.copy()
