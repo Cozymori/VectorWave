@@ -64,48 +64,33 @@ def find_recent_errors(
         limit: int = 20,
         error_codes: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
-    """
-    Searches for error logs from the last N minutes. (For Alerter)
-    Performs manual filtering in Python as db_search.py may not support range queries.
-    """
+
     logger.info(f"--- Searching for error logs from the last {minutes_ago} minutes ---")
 
-    # 1. Fetch the 100 most recent logs filtered by 'status' only.
-    filters = {"status": "ERROR"}
+    time_limit_iso = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
+
+    filters = {
+        "status": "ERROR",
+        "timestamp_utc__gte": time_limit_iso
+    }
+
+    if error_codes:
+        if len(error_codes) == 1:
+            filters["error_code"] = error_codes[0]
+        else:
+            logger.warning("find_recent_errors: Multiple error_codes filtering not yet supported, using first one.")
+            filters["error_code"] = error_codes[0]
+
 
     all_errors = find_executions(
         filters=filters,
         sort_by="timestamp_utc",
         sort_ascending=False,
-        limit=100  # Fetch a larger batch for filtering
+        limit=limit
     )
 
-    # 2. Manually filter by time and error codes in Python
-    time_limit = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
-    result = []
-
-    for log in all_errors:
-        try:
-            log_time = datetime.fromisoformat(log["timestamp_utc"])
-
-            # Skip logs that are older than the time limit
-            if log_time <= time_limit:
-                continue
-
-            # If error_codes are specified, skip logs that don't match
-            if error_codes and log.get("error_code") not in error_codes:
-                continue
-
-            # Add logs that pass all filters
-            result.append(log)
-            if len(result) >= limit:
-                break
-
-        except (ValueError, TypeError) as e:
-            logger.warning(f"Failed to parse log timestamp (log_time='{log.get('timestamp_utc')}'): {e}")
-
-    logger.info(f"-> Found {len(result)} matching errors.")
-    return result
+    logger.info(f"-> Found {len(all_errors)} matching errors.")
+    return all_errors
 
 
 def find_slowest_executions(
@@ -117,13 +102,9 @@ def find_slowest_executions(
     """
     logger.info(f"\n--- Searching for Top {limit} Slowest Executions ---")
 
-    # [Note] db_search.py currently only supports equality filters.
-    # A more advanced implementation would pass a range filter.
     filters = {}
     if min_duration_ms > 0:
-        # This filter will only work if db_search.py is updated
-        # filters["duration_ms__gte"] = min_duration_ms
-        logger.warning(f"min_duration_ms filter is not yet supported in db_search.py, ignoring.")
+        filters["duration_ms__gte"] = min_duration_ms
 
     return find_executions(
         filters=filters,
