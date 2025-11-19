@@ -214,3 +214,73 @@ def search_executions(
 
     except Exception as e:
         raise WeaviateConnectionError(f"Failed to execute 'search_executions': {e}")
+
+def search_similar_execution(
+        query_vector: List[float],
+        function_name: str,
+        threshold: float = 0.9,
+        limit: int = 1
+) -> Optional[Dict[str, Any]]:
+    """
+    Searches the 'VectorWaveExecutions' collection for a successful log
+    with a semantically similar input vector, used for Semantic Caching.
+
+    Args:
+        query_vector: The vector of the serialized function input.
+        function_name: The name of the function to filter by.
+        threshold: The similarity threshold (0.0 to 1.0). Only returns results
+                   where certainty >= threshold.
+        limit: The maximum number of results to return (default 1 for caching).
+
+    Returns:
+        The properties of the best matching execution log if found, otherwise None.
+    """
+    try:
+        settings: WeaviateSettings = get_weaviate_settings()
+        client: weaviate.WeaviateClient = get_cached_client()
+
+        collection = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+
+        # 1. Build Base Filters: Must be a successful execution of the target function
+        base_filters = {
+            "status": "SUCCESS",
+            "function_name": function_name
+        }
+        weaviate_filter = _build_weaviate_filters(base_filters)
+
+        # Weaviate's near_vector uses `certainty` for similarity thresholding.
+        certainty_threshold = threshold
+
+        logger.info(f"Performing near_vector cache search for '{function_name}' with certainty >= {certainty_threshold}")
+
+        response = collection.query.near_vector(
+            near_vector=query_vector,
+            limit=limit,
+            filters=weaviate_filter,
+            certainty=certainty_threshold,
+            # We only need the return value and metadata
+            return_metadata=wvc.query.MetadataQuery(distance=True, certainty=True),
+            return_properties=["return_value", "timestamp_utc"]
+        )
+
+        if response.objects:
+            # Found a match. Extract the properties and metadata.
+            best_match = response.objects[0]
+
+            result = {
+                'return_value': best_match.properties.get('return_value'),
+                'metadata': {
+                    'distance': best_match.metadata.distance,
+                    'certainty': best_match.metadata.certainty,
+                },
+                'uuid': str(best_match.uuid)
+            }
+
+            return result
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Error during Weaviate cache search for '{function_name}': {e}", exc_info=True)
+        # Fail gracefully: a cache search failure should not prevent execution.
+        return None
