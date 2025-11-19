@@ -1,5 +1,4 @@
 
-
 # VectorWave: Seamless Auto-Vectorization Framework
 
 [](https://opensource.org/licenses/MIT)
@@ -15,6 +14,9 @@
 * **`@vectorize` Decorator:**
   1.  **Static Data Collection:** Upon script load, the function's source code, docstring, and metadata are saved once to the `VectorWaveFunctions` collection.
   2.  **Dynamic Data Logging:** Each time the function is called, its execution time, success/failure status, error logs, and "dynamic tags" are recorded in the `VectorWaveExecutions` collection.
+* **Semantic Caching and Performance Optimization:**
+    * Determines cache hits based on the **semantic similarity** of function inputs, bypassing actual execution for identical or highly similar inputs and returning stored results immediately.
+    * This significantly **reduces latency** and costs, especially for high-cost computation functions (e.g., LLM calls, complex data processing).
 * **Distributed Tracing:** Combines `@vectorize` and `@trace_span` decorators to bundle the execution of complex, multi-step workflows under a single **`trace_id`** for analysis.
 * **Search Interface:** Provides `search_functions` and `search_executions` to query the stored vector data (function definitions) and logs (execution history), facilitating the construction of RAG and monitoring systems.
 
@@ -44,7 +46,7 @@ try:
 except Exception as e:
     print(f"DB initialization failed: {e}")
     exit()
-```
+````
 
 ### 2\. [Storage] Using `@vectorize` and Distributed Tracing
 
@@ -91,6 +93,37 @@ print("Now calling 'process_payment'...")
 # This single call will record a total of 3 execution logs (spans) in the DB,
 # and all three logs will be tied to a single 'trace_id'.
 process_payment("user_789", 5000)
+```
+
+#### Semantic Caching Example
+
+Configure a function to return a cached result if the input is semantically similar to a previous execution.
+
+```python
+from vectorwave import vectorize
+import time
+
+@vectorize(
+    search_description="High-cost LLM summarization task",
+    sequence_narrative="LLM Summarization Step",
+    semantic_cache=True,            # Enable caching
+    cache_threshold=0.95,           # Cache hit if similarity >= 0.95
+    capture_return_value=True       # Required to save the result
+)
+def summarize_document(document_text: str):
+    # Simulate an LLM call or heavy computation (e.g., 0.5 sec delay)
+    time.sleep(0.5)
+    print("--- [Cache Miss] Document is being summarized by LLM...")
+    return f"Summary of: {document_text[:20]}..."
+
+# First call (Cache Miss) - takes ~0.5s, saves result to DB
+result_1 = summarize_document("The first quarter results showed strong growth in Europe and Asia...")
+
+# Second call (Cache Hit) - takes ~0.0s, returns cached value
+# "Q1 results" is semantically similar to "first quarter results"
+result_2 = summarize_document("The Q1 results demonstrated strong growth in Europe and Asia...") 
+
+# result_2 returns the stored value without executing the function's body.
 ```
 
 ### 3\. [Retrieval ①] Search Function Definitions (for RAG)
@@ -160,7 +193,12 @@ You can select the text vectorization method via the `VECTORIZER` environment va
 | **`weaviate_module`** | (Docker Delegate) Delegates vectorization to Weaviate's built-in module (e.g., `text2vec-openai`). | `WEAVIATE_VECTORIZER_MODULE`, `OPENAI_API_KEY` |
 | **`none`** | Disables vectorization. Data is stored without vectors. | None |
 
------
+#### ⚠️ Semantic Caching Prerequisites and Configuration
+
+To use `semantic_cache=True`, the following conditions must be met:
+
+* **Vectorizer Required:** A **Python-based vectorizer** (`huggingface` or `openai_client`) must be configured in your environment (`VECTORIZER` environment variable). Caching is automatically disabled if set to `weaviate_module` or `none`.
+* **Return Value Capture:** The `capture_return_value` parameter is automatically set to `True` when `semantic_cache=True` is enabled.
 
 ### .env File Examples
 
@@ -240,8 +278,6 @@ CUSTOM_PROPERTIES_FILE_PATH=.weaviate_properties
 FAILURE_MAPPING_FILE_PATH=.vectorwave_errors.json
 RUN_ID=test-run-001
 ```
-
------
 
 ### 🚀 Advanced Failure Tracing (Error Code)
 
@@ -371,7 +407,6 @@ def other_function():
     pass
 ```
 
-
 1.  **Validation (Important):** Tags (global or function-specific) will **only** be saved to Weaviate if their key (e.g., `run_id`, `team`, `priority`) was first defined in the `.weaviate_properties` file (Step 1). Tags not defined in the schema are **ignored**, and a warning is logged at startup.
 
 2.  **Priority (Override):** If a tag key is defined in both places (e.g., global `RUN_ID` in `.env` and `run_id="override-xyz"` in the decorator), the **function-specific tag from the decorator always wins**.
@@ -388,6 +423,7 @@ def other_function():
 Beyond just logging, `VectorWave` can send **real-time notifications via webhook** the instant an error occurs. This functionality is built directly into the tracer and can be activated simply by updating your `.env` file.
 
 **How it Works:**
+
 1.  An exception is raised within a function decorated by `@trace_span` or `@vectorize`.
 2.  The tracer catches the exception in its `except` block and immediately calls the `alerter` object.
 3.  The alerter reads the `.env` configuration and uses the `WebhookAlerter` to dispatch the error details to your specified URL.
@@ -407,8 +443,6 @@ ALERTER_WEBHOOK_URL="[https://discord.com/api/webhooks/YOUR_HOOK_ID/](https://di
 With just these two lines, running test_ex/example.py will now instantly send a Discord alert when the CustomValueError is raised.
 
 Extensibility (Strategy Pattern): The alerting system is built on a Strategy Pattern. You can easily extend it by implementing the BaseAlerter interface to support other channels like email, PagerDuty, or more.
-
-**Tag Merging and Validation Rules**
 ```
 
 ## 🤝 Contributing

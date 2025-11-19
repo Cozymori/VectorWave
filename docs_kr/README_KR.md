@@ -1,4 +1,3 @@
-
 # VectorWave: Seamless Auto-Vectorization Framework
 
 [](https://www.google.com/search?q=LICENSE)
@@ -14,6 +13,9 @@
 * **`@vectorize` 데코레이터:**
   1.  **정적 데이터 수집:** 스크립트 로드 시, 함수의 소스 코드, 독스트링, 메타데이터를 `VectorWaveFunctions` 컬렉션에 1회 저장합니다.
   2.  **동적 데이터 로깅:** 함수가 호출될 때마다 실행 시간, 성공/실패 상태, 에러 로그, 그리고 '동적 태그'를 `VectorWaveExecutions` 컬렉션에 기록합니다.
+* **시맨틱 캐싱 및 성능 최적화 (Semantic Caching and Performance Optimization):**
+    * 함수 입력의 의미적 유사성(semantic similarity)을 기반으로 캐시 적중(cache hit)을 판별하여, 동일하거나 매우 유사한 입력에 대한 함수 실행을 우회하고 저장된 결과를 즉시 반환합니다.
+    * 이는 특히 고비용 계산 함수(예: LLM 호출, 복잡한 데이터 처리)의 **실행 지연 시간(latency)을 크게 단축**하고 비용을 절감하는 데 효과적입니다.
 * **분산 추적 (Distributed Tracing):** `@vectorize`와 `@trace_span` 데코레이터를 결합하여 복잡한 다단계 워크플로우의 실행을 하나의 **`trace_id`**로 묶어 분석할 수 있습니다.
 * **검색 인터페이스:** 저장된 벡터 데이터(함수 정의)와 로그(실행 기록)를 검색하는 `search_functions` 및 `search_executions` 함수를 제공하여 RAG 및 모니터링 시스템 구축을 용이하게 합니다.
 
@@ -92,6 +94,37 @@ print("Now calling 'process_payment'...")
 process_payment("user_789", 5000)
 ```
 
+#### 시맨틱 캐싱 활용 예시 (Semantic Caching Example)
+
+함수 입력이 유사할 경우 재실행을 방지하고 캐시된 결과를 반환하도록 설정합니다.
+
+```python
+from vectorwave import vectorize
+import time
+
+@vectorize(
+    search_description="LLM을 이용한 고비용 요약 작업",
+    sequence_narrative="LLM Summarization Step",
+    semantic_cache=True,            # 캐싱 활성화
+    cache_threshold=0.95,           # 95% 이상 유사할 경우 캐시 적중
+    capture_return_value=True       # 캐싱을 위해 반환 값 저장 필수
+)
+def summarize_document(document_text: str):
+    # 실제 LLM 호출 또는 고비용 계산 로직 (예: 0.5초 지연)
+    time.sleep(0.5)
+    print("--- [Cache Miss] Document is being summarized by LLM...")
+    return f"Summary of: {document_text[:20]}..."
+
+# 첫 번째 호출 (Cache Miss) - 0.5초 소요, DB에 결과 저장
+result_1 = summarize_document("The first quarter results showed strong growth in Europe and Asia...")
+
+# 두 번째 호출 (Cache Hit) - 0.0초 소요, 캐시된 값 반환
+# "Q1 results"가 "first quarter results"와 의미적으로 유사하여 캐시에 적중될 수 있습니다.
+result_2 = summarize_document("The Q1 results demonstrated strong growth in Europe and Asia...") 
+
+# result_2는 실제 함수 실행 없이 result_1의 저장된 값을 반환합니다.
+```
+
 ### 3\. [검색 ①] 함수 정의 검색 (RAG 용도)
 
 ```python
@@ -142,12 +175,6 @@ for i, span in enumerate(trace_spans):
 
 -----
 
-알겠습니다. 기존 `README_KR.md` 파일의 `⚙️ 설정 (Configuration)` 섹션을 **새로운 벡터화 전략** 내용으로 업데이트하고, 요청하신 대로 각 전략별 `.env` 설정 예시 코드를 추가하겠습니다.
-
-다음은 `vtm/docs_kr/README_KR.md` 파일의 **"-----"** 구분선 사이에 들어갈 업데이트된 **"설정"** 섹션의 전체 내용입니다.
-
------
-
 ## ⚙️ 설정 (Configuration)
 
 VectorWave는 Weaviate 데이터베이스 연결 정보와 **벡터화 전략**을 **환경 변수** 또는 `.env` 파일을 통해 자동으로 읽어옵니다.
@@ -165,7 +192,12 @@ VectorWave는 Weaviate 데이터베이스 연결 정보와 **벡터화 전략**�
 | **`weaviate_module`** | (Docker 위임) 벡터화 작업을 Weaviate 도커 컨테이너의 내장 모듈 (예: `text2vec-openai`)에 위임합니다. | `WEAVIATE_VECTORIZER_MODULE`, `OPENAI_API_KEY` |
 | **`none`** | 벡터화를 수행하지 않습니다. 데이터는 벡터 없이 저장됩니다. | 없음 |
 
------
+#### ⚠️ 시맨틱 캐싱 필수 조건 및 설정
+
+`semantic_cache=True`를 사용하려면 다음 조건이 충족되어야 합니다.
+
+* **벡터라이저 필수:** 라이브러리 설정(`VECTORIZER` 환경 변수)에서 **Python 기반의 벡터라이저** (`huggingface` 또는 `openai_client`)가 구성되어 있어야 합니다. `weaviate_module` 또는 `none` 설정 시 캐싱이 자동으로 비활성화됩니다.
+* **반환 값 캡처 필수:** `semantic_cache=True` 활성화 시 `capture_return_value` 매개변수는 자동으로 `True`로 설정됩니다.
 
 ### .env 파일 적용 예시
 
@@ -243,7 +275,9 @@ OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 CUSTOM_PROPERTIES_FILE_PATH=.weaviate_properties
 RUN_ID=test-run-001
 ```
+
 -----
+
 ### 🚀 고급 실패 추적 (Error Code)
 
 단순히 `status: "ERROR"`로 기록하는 것을 넘어, `VectorWaveExecutions` 로그에 `error_code` 속성을 추가하여 실패 원인을 세분화합니다.
@@ -263,7 +297,7 @@ RUN_ID=test-run-001
     def process_payment(amount):
         if amount < 0:
             raise PaymentError("Amount < 0", error_code="PAYMENT_NEGATIVE_AMOUNT")
-    
+
     # 실행 시 DB 로그: { "status": "ERROR", "error_code": "PAYMENT_NEGATIVE_AMOUNT" }
     ```
 
@@ -271,6 +305,7 @@ RUN_ID=test-run-001
     `ValueError` 등 일반적인 예외를 중앙에서 관리합니다. `.env` 파일에 `FAILURE_MAPPING_FILE_PATH` (기본값: `.vectorwave_errors.json`)로 지정된 JSON 파일에서 예외 클래스 이름을 키로 찾아 매핑합니다.
 
     **`.vectorwave_errors.json` 예시:**
+
     ```json
     {
       "ValueError": "INVALID_INPUT",
@@ -283,7 +318,7 @@ RUN_ID=test-run-001
     @vectorize(...)
     def get_config(key):
         return os.environ[key] # ⬅️ KeyError 발생
-    
+
     # 실행 시 DB 로그: { "status": "ERROR", "error_code": "CONFIG_MISSING" }
     ```
 
@@ -299,6 +334,7 @@ invalid_logs = search_executions(
   filters={"error_code": "INVALID_INPUT"},
   limit=10
 )
+```
 
 -----
 
@@ -333,7 +369,7 @@ VectorWave는 정적 데이터(함수 정의)와 동적 데이터(실행 로그)
     "description": "실행 우선순위"
   }
 }
-
+```
 
 * 위와 같이 정의하면 `VectorWaveFunctions`와 `VectorWaveExecutions` 컬렉션 모두에 `run_id`, `experiment_id`, `team`, `priority` 속성이 추가됩니다.
 
@@ -370,7 +406,6 @@ def other_function():
     pass
 ```
 
-
 **태그 병합 및 유효성 검사 규칙**
 
 1.  **유효성 검사 (중요):** 태그(전역 또는 함수별)는 **반드시** `.weaviate_properties` 파일(1단계)에 키(예: `run_id`, `team`, `priority`)가 먼저 정의된 경우에만 Weaviate에 저장됩니다. 스키마에 정의되지 않은 태그는 **무시**되며, 스크립트 시작 시 경고가 출력됩니다.
@@ -381,6 +416,7 @@ def other_function():
 
 * `process_payment()` 실행 로그: `{"run_id": "global-run-abc", "team": "billing", "priority": 1}`
 * `other_function()` 실행 로그: `{"run_id": "override-run-xyz", "team": "default-team"}`
+
 -----
 
 ### 🚀 실시간 에러 알림 (Webhook)
@@ -388,6 +424,7 @@ def other_function():
 `VectorWave`는 단순한 로그 저장을 넘어, **에러 발생 즉시** 웹훅(Webhook)을 통해 실시간 알림을 보낼 수 있습니다. 이 기능은 `tracer`에 내장되어 있으며, 별도 설정 없이 `.env` 파일 수정만으로 활성화할 수 있습니다.
 
 **작동 방식:**
+
 1.  `@trace_span` 또는 `@vectorize` 데코레이터가 적용된 함수에서 예외(Exception)가 발생합니다.
 2.  `tracer`가 `except` 블록에서 에러를 감지하는 즉시, `alerter` 객체를 호출합니다.
 3.  `alerter`는 `.env` 설정을 읽어 `WebhookAlerter`를 사용, 설정된 URL로 에러 정보를 발송합니다.
