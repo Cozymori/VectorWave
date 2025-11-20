@@ -215,6 +215,7 @@ def search_executions(
     except Exception as e:
         raise WeaviateConnectionError(f"Failed to execute 'search_executions': {e}")
 
+
 def search_similar_execution(
         query_vector: List[float],
         function_name: str,
@@ -251,7 +252,8 @@ def search_similar_execution(
         # Weaviate's near_vector uses `certainty` for similarity thresholding.
         certainty_threshold = threshold
 
-        logger.info(f"Performing near_vector cache search for '{function_name}' with certainty >= {certainty_threshold}")
+        logger.info(
+            f"Performing near_vector cache search for '{function_name}' with certainty >= {certainty_threshold}")
 
         response = collection.query.near_vector(
             near_vector=query_vector,
@@ -284,3 +286,73 @@ def search_similar_execution(
         logger.error(f"Error during Weaviate cache search for '{function_name}': {e}", exc_info=True)
         # Fail gracefully: a cache search failure should not prevent execution.
         return None
+
+
+def search_functions_hybrid(
+        query: str,
+        limit: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+        alpha: float = 0.5
+) -> List[Dict[str, Any]]:
+    """
+    Performs Hybrid Search (Keyword + Vector) on function definitions.
+
+    Args:
+        query: The search query string.
+        limit: Max number of results.
+        filters: Dictionary of filters.
+        alpha: Weight for hybrid search (0.0 = Keyword only, 1.0 = Vector only, 0.5 = Balanced).
+    """
+    try:
+        settings: WeaviateSettings = get_weaviate_settings()
+        client: weaviate.WeaviateClient = get_cached_client()
+
+        collection = client.collections.get(settings.COLLECTION_NAME)
+        weaviate_filter = _build_weaviate_filters(filters)
+
+        vectorizer = get_vectorizer()
+
+        # 1. Python Vectorizer
+        if vectorizer:
+            logger.info(f"[Hybrid] Vectorizing query with Python client... (alpha={alpha})")
+            try:
+                query_vector = vectorizer.embed(query)
+            except Exception as e:
+                logger.error(f"Query vectorization failed: {e}")
+                raise WeaviateConnectionError(f"Query vectorization failed: {e}")
+
+            # Hybrid Search with explicit vector
+            response = collection.query.hybrid(
+                query=query,
+                vector=query_vector,
+                alpha=alpha,
+                limit=limit,
+                filters=weaviate_filter,
+                return_metadata=wvc.query.MetadataQuery(score=True, distance=True)
+            )
+
+
+        else:
+            logger.info(f"[Hybrid] Searching with Weaviate module... (alpha={alpha})")
+            # Hybrid Search letting Weaviate handle vectorization (if module enabled)
+            response = collection.query.hybrid(
+                query=query,
+                alpha=alpha,
+                limit=limit,
+                filters=weaviate_filter,
+                return_metadata=wvc.query.MetadataQuery(score=True, distance=True)
+            )
+
+        results = [
+            {
+                "properties": obj.properties,
+                "metadata": obj.metadata,
+                "uuid": obj.uuid
+            }
+            for obj in response.objects
+        ]
+        return results
+
+    except Exception as e:
+        logger.error("Error during Weaviate Hybrid search: %s", e)
+        raise WeaviateConnectionError(f"Failed to execute 'search_functions_hybrid': {e}")
