@@ -78,7 +78,7 @@ def test_init_cache_invalid_json(mock_logger, mock_file, mock_exists):
 
     assert manager.cache == {}
     mock_logger.assert_called_once()
-    assert "Failed to load static function cache" in mock_logger.call_args[0][0]
+    assert "Failed to load cache" in mock_logger.call_args[0][0]
 
 
 # --- 3. Tests for logic and saving ---
@@ -112,14 +112,15 @@ def test_update_cache_calls_save(mock_file, mock_json_dump, mock_exists):
     manager.update_cache("uuid_new", "hash_new_123")
 
     # 1. Check if the internal cache was updated
-    assert manager.cache == {"uuid_new": "hash_new_123"}
+    expected_cache = {"uuid_new": {"hash": "hash_new_123", "metadata": None}}
+    assert manager.cache == expected_cache
 
     # 2. Check if _save_cache was called and attempted to write to the file
     mock_file.assert_called_once_with("./.vectorwave_functions_cache.json", 'w', encoding='utf-8')
 
     # 3. Check if json.dump was called with the correct arguments (indent, sort_keys)
     mock_json_dump.assert_called_once_with(
-        {"uuid_new": "hash_new_123"}, # 1. The updated cache
+        expected_cache, # 1. The updated cache
         ANY, # 2. The mock_file handle
         indent=4,
         sort_keys=True
