@@ -446,6 +446,94 @@ ALERTER_WEBHOOK_URL="[https://discord.com/api/webhooks/YOUR_HOOK_ID/](https://di
 확장성 (전략 패턴): 이 알림 시스템은 전략 패턴으로 설계되었습니다. BaseAlerter 인터페이스를 구현하여 이메일, PagerDuty 등 원하는 다른 알림 채널로 쉽게 확장할 수 있습니다.
 ```
 
+
+
+-----
+
+## 📝 Readme.md 추가 내용 (한국어)
+
+### 🧪 고급 기능: 테스트 및 유지보수 (Advanced Usage)
+
+VectorWave는 저장된 운영 데이터를 테스트와 유지보수에 활용할 수 있는 강력한 도구를 제공합니다.
+
+### 1\. 자동 회귀 테스트 (Replay)
+
+**운영 환경의 로그를 테스트 케이스로 변신시키세요.**
+VectorWave는 함수 실행 시의 \*\*입력값(Arguments)\*\*과 \*\*반환값(Return Value)\*\*을 기록합니다. `Replayer`는 이 데이터를 사용하여 함수를 재실행하고, 결과가 과거와 동일한지 검증하여 코드 변경으로 인한 \*\*회귀(Regression, 기존 기능 파손)\*\*를 자동으로 감지합니다.
+
+#### Replay 모드 활성화
+
+`@vectorize` 데코레이터에 `replay=True` 옵션을 추가하세요. 입력값과 반환값이 자동으로 캡처됩니다.
+
+```python
+@vectorize(
+    search_description="결제 금액 계산",
+    sequence_narrative="사용자 유효성을 검사하고 총 금액을 반환함",
+    replay=True  # <--- 이 옵션을 켜면 Replay 준비 완료!
+)
+def calculate_total(user_id: str, price: int, tax: float):
+    return price + (price * tax)
+```
+
+#### 테스트 실행 (Replay Test)
+
+별도의 테스트 스크립트에서 `VectorWaveReplayer`를 사용하여, 과거의 성공한 실행 이력을 바탕으로 현재 코드를 검증합니다.
+
+```python
+from vectorwave.utils.replayer import VectorWaveReplayer
+
+replayer = VectorWaveReplayer()
+
+# 'my_module.calculate_total' 함수의 최근 성공 로그 10개를 가져와 테스트
+result = replayer.replay("my_module.calculate_total", limit=10)
+
+print(f"통과(Passed): {result['passed']}, 실패(Failed): {result['failed']}")
+
+if result['failed'] > 0:
+    for fail in result['failures']:
+        print(f"불일치 발생! UUID: {fail['uuid']}, 기대값: {fail['expected']}, 실제값: {fail['actual']}")
+```
+
+#### 베이스라인 업데이트 (Update Baseline)
+
+로직 변경으로 인해 결과값이 바뀌는 것이 의도된 사항이라면, `update_baseline=True` 옵션을 사용하여 현재의 실행 결과를 새로운 정답(Baseline)으로 DB에 저장할 수 있습니다.
+
+```python
+# DB에 저장된 반환값을 현재 함수의 실행 결과로 업데이트합니다.
+replayer.replay("my_module.calculate_total", update_baseline=True)
+```
+
+### 2\. 데이터 아카이빙 및 파인튜닝 (Archiver)
+
+**데이터베이스 용량을 관리하고 학습 데이터셋을 확보하세요.**
+오래된 실행 로그를 **JSONL 포맷**(LLM 파인튜닝에 적합)으로 내보내거나, 데이터베이스에서 삭제하여 저장 공간을 확보할 수 있습니다.
+
+```python
+from vectorwave.database.archiver import VectorWaveArchiver
+
+archiver = VectorWaveArchiver()
+
+# 1. JSONL로 내보내고 DB에서 삭제 (Export & Clear)
+archiver.export_and_clear(
+    function_name="my_module.calculate_total",
+    output_file="data/training_dataset.jsonl",
+    clear_after_export=True  # 내보내기가 성공하면 DB에서 로그 삭제
+)
+
+# 2. 삭제만 수행 (Purge)
+archiver.export_and_clear(
+    function_name="my_module.calculate_total",
+    output_file="",
+    delete_only=True
+)
+```
+
+**생성된 JSONL 예시:**
+
+```json
+{"messages": [{"role": "user", "content": "{\"price\": 100, \"tax\": 0.1}"}, {"role": "assistant", "content": "110.0"}]}
+```
+
 ## 🤝 기여 (Contributing)
 
 버그 보고, 기능 요청, 코드 기여 등 모든 형태의 기여를 환영합니다. 자세한 내용은 [CONTRIBUTING.md](https://www.google.com/search?q=httpsS://www.google.com/search%3Fq%3DCONTRIBUTING.md)를 참고해 주세요.

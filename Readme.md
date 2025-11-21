@@ -18,6 +18,8 @@
     * Determines cache hits based on the **semantic similarity** of function inputs, bypassing actual execution for identical or highly similar inputs and returning stored results immediately.
     * This significantly **reduces latency** and costs, especially for high-cost computation functions (e.g., LLM calls, complex data processing).
 * **Distributed Tracing:** Combines `@vectorize` and `@trace_span` decorators to bundle the execution of complex, multi-step workflows under a single **`trace_id`** for analysis.
+* **Automated Regression Testing (Replay):** Replay past execution logs to automatically verify that code changes haven't broken existing functionality.
+* **Data Archiving & Maintenance:** Export execution logs to JSONL format for LLM fine-tuning or archive old data to manage database storage.
 * **Search Interface:** Provides `search_functions` and `search_executions` to query the stored vector data (function definitions) and logs (execution history), facilitating the construction of RAG and monitoring systems.
 
 -----
@@ -440,15 +442,103 @@ ALERTER_STRATEGY="webhook"
 
 # 2. Provide your webhook URL from Discord, Slack, etc.
 ALERTER_WEBHOOK_URL="[https://discord.com/api/webhooks/YOUR_HOOK_ID/](https://discord.com/api/webhooks/YOUR_HOOK_ID/)..."
-With just these two lines, running test_ex/example.py will now instantly send a Discord alert when the CustomValueError is raised.
-
-Extensibility (Strategy Pattern): The alerting system is built on a Strategy Pattern. You can easily extend it by implementing the BaseAlerter interface to support other channels like email, PagerDuty, or more.
 ```
+
+With just these two lines, running `test_ex/example.py` will now instantly send a Discord alert when the `CustomValueError` is raised.
+
+Extensibility (Strategy Pattern): The alerting system is built on a Strategy Pattern. You can easily extend it by implementing the `BaseAlerter` interface to support other channels like email, PagerDuty, or more.
+
+-----
+
+## 🧪 Advanced Usage: Testing & Maintenance
+
+VectorWave provides tools to leverage your stored production data for testing and maintenance.
+
+### 1\. Automated Regression Testing (Replay)
+
+**Turn your production logs into test cases.**
+VectorWave can record the input arguments and return values of your functions. The `Replayer` then uses this data to re-execute the function and verify that the output remains consistent, ensuring code changes haven't introduced regressions.
+
+#### Enable Replay Mode
+
+Add `replay=True` to your `@vectorize` decorator. This automatically enables capturing of all input arguments and the return value.
+
+```python
+@vectorize(
+    search_description="Calculate payment total",
+    sequence_narrative="Validates user and returns total amount",
+    replay=True  # <--- Enables automatic capture for Replay!
+)
+def calculate_total(user_id: str, price: int, tax: float):
+    return price + (price * tax)
+```
+
+#### Running the Replay Test
+
+Use `VectorWaveReplayer` in a separate test script to fetch past successful logs and verify the current code.
+
+```python
+from vectorwave.utils.replayer import VectorWaveReplayer
+
+replayer = VectorWaveReplayer()
+
+# Fetch the last 10 successful logs for 'my_module.calculate_total' and test them.
+result = replayer.replay("my_module.calculate_total", limit=10)
+
+print(f"Passed: {result['passed']}, Failed: {result['failed']}")
+
+if result['failed'] > 0:
+    for fail in result['failures']:
+        print(f"Mismatch! UUID: {fail['uuid']}, Expected: {fail['expected']}, Actual: {fail['actual']}")
+```
+
+#### Updating the Baseline
+
+If a logic change intentionally alters the return value, you can update the stored logs to reflect the new "correct" answer (Baseline) using `update_baseline=True`.
+
+```python
+# Updates the stored return values in the DB to match the current function's output.
+replayer.replay("my_module.calculate_total", update_baseline=True)
+```
+
+### 2\. Data Archiving & Fine-tuning (Archiver)
+
+**Manage storage and create training datasets.**
+You can export old execution logs to **JSONL format** (suitable for LLM fine-tuning) or delete them from the database to free up space.
+
+```python
+from vectorwave.database.archiver import VectorWaveArchiver
+
+archiver = VectorWaveArchiver()
+
+# 1. Export to JSONL and Delete from DB (Export & Clear)
+archiver.export_and_clear(
+    function_name="my_module.calculate_total",
+    output_file="data/training_dataset.jsonl",
+    clear_after_export=True  # Removes logs from DB after successful export
+)
+
+# 2. Delete Only (Purge)
+archiver.export_and_clear(
+    function_name="my_module.calculate_total",
+    output_file="",
+    delete_only=True
+)
+```
+
+**Generated JSONL Example:**
+
+```json
+{"messages": [{"role": "user", "content": "{\"price\": 100, \"tax\": 0.1}"}, {"role": "assistant", "content": "110.0"}]}
+```
+
+-----
 
 ## 🤝 Contributing
 
-Bug reports, feature requests, and code contributions are all welcome. For details, please see [CONTRIBUTING.md](https://www.google.com/search?q=httpsS://www.google.com/search%3Fq%3DCONTRIBUTING.md).
+Bug reports, feature requests, and code contributions are all welcome. For details, please see [CONTRIBUTING.md](https://www.google.com/search?q=https://github.com/junyeong0619/vectorwave/blob/main/Contributing.md).
 
 ## 📜 License
 
-This project is distributed under the MIT License. See the [LICENSE](https://www.google.com/search?q=LICENSE) file for details.
+This project is distributed under the MIT License. See the [LICENSE](https://www.google.com/search?q=https://github.com/junyeong0619/vectorwave/blob/main/LICENSE) file for details.
+
