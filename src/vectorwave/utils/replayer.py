@@ -4,6 +4,7 @@ import logging
 import traceback
 import inspect
 from typing import Any, Dict, List, Optional
+import asyncio
 
 import weaviate.classes.query as wvc_query
 
@@ -13,6 +14,7 @@ from ..monitoring.tracer import _mask_and_serialize
 
 # Logger setup
 logger = logging.getLogger(__name__)
+
 
 class VectorWaveReplayer:
     """
@@ -40,6 +42,8 @@ class VectorWaveReplayer:
         except (ValueError, ImportError, AttributeError) as e:
             logger.error(f"Could not load function: {function_full_name}. Error: {e}")
             return {"error": f"Function loading failed: {e}"}
+
+        is_async_func = inspect.iscoroutinefunction(target_func)
 
         # 2. Retrieve Test Data (Past Logs) from DB
         collection = self.client.collections.get(self.collection_name)
@@ -78,7 +82,10 @@ class VectorWaveReplayer:
 
             try:
                 # 3. Function Re-execution
-                actual_output = target_func(**inputs)
+                if is_async_func:
+                    actual_output = asyncio.run(target_func(**inputs))
+                else:
+                    actual_output = target_func(**inputs)
 
                 # 4. Result Validation
                 is_match = self._compare_results(expected_output, actual_output)
@@ -110,7 +117,7 @@ class VectorWaveReplayer:
                     "uuid": str(obj.uuid),
                     "inputs": inputs,
                     "expected": expected_output,  # <-- Added
-                    "actual": "EXCEPTION_RAISED", # <-- Added
+                    "actual": "EXCEPTION_RAISED",  # <-- Added
                     "error": str(e),
                     "traceback": traceback.format_exc()
                 })
@@ -164,7 +171,7 @@ class VectorWaveReplayer:
             # Serialize to JSON string (e.g., "value" -> "\"value\"")
             val_str = json.dumps(processed_val)
         except (TypeError, ValueError):
-            val_str = str(processed_val) # Fallback to standard string conversion
+            val_str = str(processed_val)  # Fallback to standard string conversion
 
         try:
             collection.data.update(
