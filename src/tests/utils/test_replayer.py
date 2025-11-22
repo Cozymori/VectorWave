@@ -1,5 +1,7 @@
 import pytest
 import json
+import asyncio
+import inspect
 from unittest.mock import MagicMock, patch
 from vectorwave.utils.replayer import VectorWaveReplayer
 
@@ -195,3 +197,45 @@ def test_replay_argument_filtering(mock_replayer_deps):
     # Assert
     # Should only be called with 'a=10', excluding 'team' and 'priority'
     mock_func.assert_called_once_with(a=10)
+
+def test_replay_async_function_execution_fixed(mock_replayer_deps):
+    """
+    [Case 5] Async Function Test (FIXED): Tests the async execution path using patching
+    of the import mechanism and executing the actual async function via asyncio.run.
+    """
+    # Arrange
+    replayer = VectorWaveReplayer()
+
+    # 1. DB Mock Data
+    inputs = {"a": 1, "b": 2}
+    expected_result = 3
+    mock_logs = [create_mock_log("uuid-async-1", inputs, expected_result)]
+    mock_replayer_deps["query"].fetch_objects.return_value.objects = mock_logs
+
+    # 2. Define the actual ASYNC function for replayer to execute
+    async def real_async_add(a, b):
+        # This function will be called and executed by asyncio.run
+        await asyncio.sleep(0.001)
+        return a + b
+
+    # Manually attach the signature for the replayer's inspection check to pass
+    setattr(real_async_add, '__signature__', inspect.Signature([
+        inspect.Parameter('a', inspect.Parameter.POSITIONAL_OR_KEYWORD),
+        inspect.Parameter('b', inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]))
+
+    # 3. Patch importlib.import_module to return a mock module that contains the target function
+    mock_module = MagicMock()
+    mock_module.async_add = real_async_add # The mock module must have the function
+
+    with patch("vectorwave.utils.replayer.importlib.import_module", return_value=mock_module):
+
+        # Act
+        # replayer.replay (sync function) calls asyncio.run(real_async_add(**inputs)) internally.
+        result = replayer.replay("my_module.async_add", limit=1)
+
+    # Assert
+    # 1. The result should be successful and match the expected output
+    assert result["passed"] == 1
+    assert result["failed"] == 0
+    assert result["failures"] == []
