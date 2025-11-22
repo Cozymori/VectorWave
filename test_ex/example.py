@@ -120,6 +120,29 @@ try:
             points *= 2
         return {"points": points, "tier": "VIP" if is_vip else "Regular"}
 
+    import random
+
+    @vectorize(
+        search_description="Generate a summary of customer review.",
+        team="ai-service",
+        priority=2,
+        replay=True
+    )
+    def generate_review_summary(review_text: str):
+        """
+        (LLM 시뮬레이션) 리뷰 요약 함수.
+        호출될 때마다 문장 표현이 조금씩 달라지지만 의미는 같습니다.
+        """
+        print(f"  [AI] Summarizing review: {review_text[:10]}...")
+
+        responses = [
+            "The customer is highly satisfied with the product quality and fast shipping.",
+            "User expressed great satisfaction regarding quality and delivery speed.",
+            "Great product quality and fast delivery made the customer happy."
+        ]
+
+        return random.choice(responses)
+
 
     # [NEW] Auto-Documentation Trigger (must be after function definitions)
     print("🚀 Checking for functions needing auto-documentation...")
@@ -145,6 +168,13 @@ try:
             process_payment(user_id="user_B", amount=-50)
         except CustomValueError as ve:
             print(f"  -> Intended error caught: {ve}")
+
+        generate_review_summary(review_text='I really loved this item! It arrived so fast...')
+        generate_review_summary(review_text='I really loved this item! It arrived so fast...')
+        generate_review_summary(review_text='I really loved this item! It arrived so fast...')
+        generate_review_summary(review_text='I really loved this item! It arrived so fast...')
+        generate_review_summary(review_text='I really loved this item! It arrived so fast...')
+        generate_review_summary(review_text='I really loved this item! It arrived so fast...')
 
         time.sleep(10)
 
