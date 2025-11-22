@@ -64,7 +64,6 @@ def find_recent_errors(
         limit: int = 20,
         error_codes: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
-
     logger.info(f"--- Searching for error logs from the last {minutes_ago} minutes ---")
 
     time_limit_iso = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
@@ -75,12 +74,7 @@ def find_recent_errors(
     }
 
     if error_codes:
-        if len(error_codes) == 1:
-            filters["error_code"] = error_codes[0]
-        else:
-            logger.warning("find_recent_errors: Multiple error_codes filtering not yet supported, using first one.")
-            filters["error_code"] = error_codes[0]
-
+        filters["error_code"] = error_codes
 
     all_errors = find_executions(
         filters=filters,
