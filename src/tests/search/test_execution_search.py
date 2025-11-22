@@ -54,7 +54,6 @@ mock_db_errors = [
     {"timestamp_utc": (mock_now - timedelta(minutes=15)).isoformat(), "error_code": "INVALID_INPUT"},  # Too old
 ]
 
-
 # [Core Fix] Create mock datetime class
 # Replaces the datetime.datetime class itself.
 MockDateTime = MagicMock()
@@ -80,8 +79,29 @@ def test_find_recent_errors(mock_find_executions):
     filters_arg = call_args.kwargs['filters']
 
     assert filters_arg['status'] == 'ERROR'
-    assert filters_arg['error_code'] == 'INVALID_INPUT'
+    assert filters_arg['error_code'] == ['INVALID_INPUT']
     assert filters_arg['timestamp_utc__gte'] == expected_time_limit_iso
+
+
+@patch('vectorwave.search.execution_search.datetime', MockDateTime)
+@patch('vectorwave.search.execution_search.find_executions')
+def test_find_recent_errors_multi_code(mock_find_executions):
+    """
+    Tests if find_recent_errors handles multiple error codes correctly by passing the list.
+    (Tests the newly implemented multi-code filtering path)
+    """
+    error_list = ["INVALID_INPUT", "TIMEOUT_ERROR"]
+    find_recent_errors(minutes_ago=20, limit=5, error_codes=error_list)
+
+    call_args = mock_find_executions.call_args
+    filters_arg = call_args.kwargs['filters']
+
+    assert filters_arg['status'] == 'ERROR'
+    assert filters_arg['error_code'] == error_list
+    assert call_args.kwargs['limit'] == 5
+
+    expected_time_limit_iso_20 = (mock_now - timedelta(minutes=20)).isoformat()
+    assert filters_arg['timestamp_utc__gte'] == expected_time_limit_iso_20
 
 
 @patch('vectorwave.search.execution_search.find_executions')
