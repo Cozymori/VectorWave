@@ -33,7 +33,11 @@ def _build_weaviate_filters(filters: Optional[Dict[str, Any]]) -> _Filters | Non
             prop = Filter.by_property(prop_name)
 
             if operator == 'equal':
-                filter_list.append(prop.equal(value))
+                if isinstance(value, list) and value:
+                    # Use contains_any for matching any value in the list (equivalent to SQL IN)
+                    filter_list.append(prop.contains_any(value))
+                else:
+                    filter_list.append(prop.equal(value))
             elif operator == 'not_equal':
                 filter_list.append(prop.not_equal(value))
             elif operator == 'gte':  # Greater than or equal
