@@ -1,7 +1,7 @@
 import logging
 import weaviate
 import weaviate.classes as wvc
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 from weaviate.collections.classes.filters import _Filters
 from weaviate.classes.query import Filter
@@ -360,3 +360,52 @@ def search_functions_hybrid(
     except Exception as e:
         logger.error("Error during Weaviate Hybrid search: %s", e)
         raise WeaviateConnectionError(f"Failed to execute 'search_functions_hybrid': {e}")
+
+
+def check_semantic_drift(
+        vector: List[float],
+        function_name: str,
+        threshold: float,
+        k: int = 5
+) -> Tuple[bool, float, Optional[str]]:
+    """
+    KNN based semantic drift check.
+    """
+    try:
+        settings = get_weaviate_settings()
+        client = get_cached_client()
+        collection = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+
+        response = collection.query.near_vector(
+            near_vector=vector,
+            limit=k,
+            filters=(
+                    wvc.query.Filter.by_property("function_name").equal(function_name) &
+                    wvc.query.Filter.by_property("status").equal("SUCCESS")
+            ),
+            return_metadata=wvc.query.MetadataQuery(distance=True),
+            return_properties=[]
+        )
+
+        objects = response.objects
+        if not objects:
+            return False, 0.0, None
+
+        distances = [obj.metadata.distance for obj in objects]
+        avg_distance = sum(distances) / len(distances)
+
+        nearest_uuid = str(objects[0].uuid)
+
+        is_drift = avg_distance > threshold
+
+        if is_drift:
+            logger.warning(
+                f"🚨 [Semantic Drift] '{function_name}' detected anomaly! "
+                f"Avg Distance (k={len(objects)}): {avg_distance:.4f} (Threshold: {threshold})"
+            )
+
+        return is_drift, avg_distance, nearest_uuid
+
+    except Exception as e:
+        logger.error(f"Failed to check semantic drift: {e}")
+        return False, 0.0, None
