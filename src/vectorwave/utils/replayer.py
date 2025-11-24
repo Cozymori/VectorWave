@@ -5,6 +5,8 @@ import traceback
 import inspect
 from typing import Any, Dict, List, Optional
 import asyncio
+import difflib
+import pprint
 
 import weaviate.classes.query as wvc_query
 
@@ -33,6 +35,7 @@ class VectorWaveReplayer:
                update_baseline: bool = False) -> Dict[str, Any]:
         """
         Retrieves past execution history of a specific function, re-executes it (Replay), and validates the result.
+        Returns a dictionary containing diff_html for UI visualization.
         """
         # 1. Dynamic Function Loading (Dynamic Import)
         try:
@@ -72,7 +75,7 @@ class VectorWaveReplayer:
             logger.warning(f"No data found to test: {function_full_name}")
             return results
 
-        print(f"🔄 Replaying {len(response.objects)} logs for '{function_full_name}'...")
+        logger.info(f"Starting Replay: {len(response.objects)} logs for '{function_full_name}'")
 
         for obj in response.objects:
             results["total"] += 1
@@ -92,37 +95,46 @@ class VectorWaveReplayer:
 
                 if is_match:
                     results["passed"] += 1
+                    logger.debug(f"UUID {obj.uuid}: PASSED")
                 else:
                     # 5. Handle Mismatch
                     if update_baseline:
                         self._update_baseline_value(collection, obj.uuid, actual_output)
                         results["updated"] += 1
                         results["passed"] += 1
-                        print(f"  ⚠️ [Updated] UUID {obj.uuid} result updated.")
+                        logger.info(f"UUID {obj.uuid}: Baseline UPDATED")
                     else:
                         results["failed"] += 1
+
+                        # Generate Visual Diff
+                        diff_html = self._generate_diff_html(expected_output, actual_output)
+
                         results["failures"].append({
                             "uuid": str(obj.uuid),
                             "inputs": inputs,
                             "expected": expected_output,
-                            "actual": actual_output
+                            "actual": actual_output,
+                            "diff_html": diff_html  # UI visualization field
                         })
-                        print(f"  ❌ [Failed] UUID {obj.uuid} | Expected: {expected_output} != Actual: {actual_output}")
+                        logger.warning(f"UUID {obj.uuid}: FAILED (Mismatch)")
 
             except Exception as e:
-
                 results["failed"] += 1
+                error_msg = f"Exception: {str(e)}"
+                logger.error(f"UUID {obj.uuid}: EXECUTION ERROR - {e}")
 
                 results["failures"].append({
                     "uuid": str(obj.uuid),
                     "inputs": inputs,
-                    "expected": expected_output,  # <-- Added
-                    "actual": "EXCEPTION_RAISED",  # <-- Added
-                    "error": str(e),
+                    "expected": expected_output,
+                    "actual": "EXCEPTION_RAISED",
+                    "error": error_msg,
+                    "diff_html": f"<div class='error' style='color:red; padding:10px; border:1px solid red; background:#fff0f0;"
+                                 f"'><strong>Runtime Error:</strong><pre>{traceback.format_exc()}</pre></div>",
                     "traceback": traceback.format_exc()
                 })
-                print(f"  ❌ [Error] UUID {obj.uuid} exception occurred during execution: {e}")
 
+        logger.info(f"Replay Finished. Passed: {results['passed']}, Failed: {results['failed']}, Updated: {results['updated']}")
         return results
 
     def _extract_inputs(self, props: Dict[str, Any], target_func: callable) -> Dict[str, Any]:
@@ -180,3 +192,20 @@ class VectorWaveReplayer:
             )
         except Exception as e:
             logger.error(f"Failed to update baseline for {uuid}: {e}")
+
+    def _generate_diff_html(self, expected: Any, actual: Any) -> str:
+        """Generates a side-by-side HTML diff table."""
+        # Pretty print for better diff comparison
+        exp_str = pprint.pformat(expected, width=80)
+        act_str = pprint.pformat(actual, width=80)
+
+        # Generate HTML table
+        diff_html = difflib.HtmlDiff(wrapcolumn=80).make_table(
+            fromlines=exp_str.splitlines(),
+            tolines=act_str.splitlines(),
+            fromdesc='Expected (Baseline)',
+            todesc='Actual (Current)',
+            context=True,  # Show only context around changes
+            numlines=3
+        )
+        return diff_html

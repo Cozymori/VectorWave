@@ -1,10 +1,11 @@
+import importlib
 import json
 import logging
 import traceback
 import math
 import asyncio
 import inspect
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import weaviate.classes.query as wvc_query
 
@@ -23,6 +24,7 @@ class SemanticReplayer(VectorWaveReplayer):
     """
     A subclass of VectorWaveReplayer that adds AI-powered semantic comparison capabilities.
     It supports Vector Cosine Similarity and LLM-as-a-Judge evaluation.
+    Location: src/vectorwave/utils/replayer_semantic.py
     """
 
     def __init__(self):
@@ -39,22 +41,28 @@ class SemanticReplayer(VectorWaveReplayer):
                function_full_name: str,
                limit: int = 10,
                update_baseline: bool = False,
-               similarity_threshold: Optional[float] = None,  # [New]
-               semantic_eval: bool = False  # [New]
+               similarity_threshold: Optional[float] = None,
+               semantic_eval: bool = False
                ) -> Dict[str, Any]:
         """
-        Overridden replay method to support semantic comparison options.
+        Retrieves past execution history of a specific function, re-executes it (Replay),
+        and validates the result using semantic comparison options.
+        Returns a dictionary containing diff_html for UI visualization.
         """
-        # 1. Load Function dynamically (Reuse parent method logic if possible, but here we reimplement for clarity due to local vars)
-        target_func = self._load_target_function(function_full_name)
-        if isinstance(target_func, dict) and "error" in target_func:
-            return target_func
+        # 1. Dynamic Function Loading (Dynamic Import)
+        try:
+            module_name, func_short_name = function_full_name.rsplit('.', 1)
+            module = importlib.import_module(module_name)
+            target_func = getattr(module, func_short_name)
+        except (ValueError, ImportError, AttributeError) as e:
+            logger.error(f"Could not load function: {function_full_name}. Error: {e}")
+            return {"error": f"Function loading failed: {e}"}
 
         is_async_func = inspect.iscoroutinefunction(target_func)
-        func_short_name = function_full_name.rsplit('.', 1)[-1]
 
-        # 2. Retrieve Data
+        # 2. Retrieve Test Data (Past Logs) from DB
         collection = self.client.collections.get(self.collection_name)
+
         filters = (
                 wvc_query.Filter.by_property("function_name").equal(func_short_name) &
                 wvc_query.Filter.by_property("status").equal("SUCCESS")
@@ -79,25 +87,26 @@ class SemanticReplayer(VectorWaveReplayer):
             logger.warning(f"No data found to test: {function_full_name}")
             return results
 
-        print(f"🤖 [Semantic Replay] Testing {len(response.objects)} logs for '{function_full_name}'...")
+        logger.info(f"Starting Semantic Replay: {len(response.objects)} logs for '{function_full_name}'")
         if similarity_threshold:
-            print(f"   - Mode: Vector Similarity >= {similarity_threshold}")
+            logger.info(f"   - Mode: Vector Similarity >= {similarity_threshold}")
         if semantic_eval:
-            print(f"   - Mode: Semantic Evaluation (LLM-as-a-Judge)")
+            logger.info(f"   - Mode: Semantic Evaluation (LLM-as-a-Judge)")
 
         for obj in response.objects:
             results["total"] += 1
+
             inputs = self._extract_inputs(obj.properties, target_func)
             expected_output = self._deserialize_value(obj.properties.get("return_value"))
 
             try:
-                # 3. Re-execution
+                # 3. Function Re-execution
                 if is_async_func:
                     actual_output = asyncio.run(target_func(**inputs))
                 else:
                     actual_output = target_func(**inputs)
 
-                # 4. Enhanced Comparison
+                # 4. Result Validation (Semantic Comparison)
                 is_match, match_reason = self._compare_results_semantic(
                     expected_output,
                     actual_output,
@@ -107,49 +116,48 @@ class SemanticReplayer(VectorWaveReplayer):
 
                 if is_match:
                     results["passed"] += 1
+                    logger.debug(f"UUID {obj.uuid}: PASSED ({match_reason})")
                 else:
                     # 5. Handle Mismatch
                     if update_baseline:
                         self._update_baseline_value(collection, obj.uuid, actual_output)
                         results["updated"] += 1
                         results["passed"] += 1
-                        print(f"  ⚠️ [Updated] UUID {obj.uuid} baseline updated.")
+                        logger.info(f"UUID {obj.uuid}: Baseline UPDATED")
                     else:
                         results["failed"] += 1
+
+                        # Generate Visual Diff (inherited from parent)
+                        diff_html = self._generate_diff_html(expected_output, actual_output)
+
                         results["failures"].append({
                             "uuid": str(obj.uuid),
                             "inputs": inputs,
                             "expected": expected_output,
                             "actual": actual_output,
-                            "reason": match_reason
+                            "diff_html": diff_html,  # UI visualization field
+                            "reason": match_reason   # Semantic failure reason
                         })
-                        print(f"  ❌ [Failed] UUID {obj.uuid} | {match_reason}")
-                        print(f"     Expected: {str(expected_output)[:60]}...")
-                        print(f"     Actual:   {str(actual_output)[:60]}...")
+                        logger.warning(f"UUID {obj.uuid}: FAILED ({match_reason})")
 
             except Exception as e:
                 results["failed"] += 1
+                error_msg = f"Exception: {str(e)}"
+                logger.error(f"UUID {obj.uuid}: EXECUTION ERROR - {e}")
+
                 results["failures"].append({
                     "uuid": str(obj.uuid),
                     "inputs": inputs,
                     "expected": expected_output,
                     "actual": "EXCEPTION_RAISED",
-                    "error": str(e),
+                    "error": error_msg,
+                    "diff_html": f"<div class='error' style='color:red; padding:10px; border:1px solid red; background:#fff0f0;"
+                                 f"'><strong>Runtime Error:</strong><pre>{traceback.format_exc()}</pre></div>",
                     "traceback": traceback.format_exc()
                 })
-                print(f"  ❌ [Error] UUID {obj.uuid}: {e}")
 
+        logger.info(f"Replay Finished. Passed: {results['passed']}, Failed: {results['failed']}, Updated: {results['updated']}")
         return results
-
-    def _load_target_function(self, full_name: str):
-        """Helper to load function (Refactored from original code for reuse)"""
-        try:
-            import importlib
-            module_name, func_short_name = full_name.rsplit('.', 1)
-            module = importlib.import_module(module_name)
-            return getattr(module, func_short_name)
-        except Exception as e:
-            return {"error": str(e)}
 
     def _compare_results_semantic(self, expected: Any, actual: Any,
                                   similarity_threshold: Optional[float],
@@ -205,10 +213,10 @@ class SemanticReplayer(VectorWaveReplayer):
         prompt = f"""
         Compare two outputs. Are they semantically equivalent?
         Ignore minor formatting differences.
-        
+
         Expected: {expected}
         Actual: {actual}
-        
+
         Respond JSON: {{"equivalent": true}} or {{"equivalent": false}}
         """
         try:
