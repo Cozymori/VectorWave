@@ -5,6 +5,9 @@ from .database.db_search import search_functions, search_executions, search_erro
 from .monitoring.tracer import trace_span
 from .search.rag_search import search_and_answer, analyze_trace_log
 from .core.generator import generate_and_register_metadata
+from .utils.healer import VectorWaveHealer
+from .utils.replayer import VectorWaveReplayer
+from .utils.replayer_semantic import SemanticReplayer
 
 __all__ = [
     'vectorize',
@@ -16,5 +19,8 @@ __all__ = [
     'trace_span',
     'search_and_answer',
     'analyze_trace_log',
-    'generate_and_register_metadata'
+    'generate_and_register_metadata',
+    'VectorWaveHealer',
+    'VectorWaveReplayer',
+    'SemanticReplayer'
 ]
