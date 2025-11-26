@@ -6,6 +6,7 @@ import math
 import asyncio
 import inspect
 from typing import Any, Dict, List, Optional
+from ..core.llm.factory import get_llm_client
 
 import weaviate.classes.query as wvc_query
 
@@ -29,13 +30,7 @@ class SemanticReplayer(VectorWaveReplayer):
 
     def __init__(self):
         super().__init__()
-        self.openai_client = self._init_openai()
-
-    def _init_openai(self) -> Optional[Any]:
-        """Initialize OpenAI client if available and configured."""
-        if OpenAI and self.settings.OPENAI_API_KEY:
-            return OpenAI(api_key=self.settings.OPENAI_API_KEY)
-        return None
+        self.openai_client = get_llm_client()
 
     def replay(self,
                function_full_name: str,
@@ -136,7 +131,7 @@ class SemanticReplayer(VectorWaveReplayer):
                             "expected": expected_output,
                             "actual": actual_output,
                             "diff_html": diff_html,  # UI visualization field
-                            "reason": match_reason   # Semantic failure reason
+                            "reason": match_reason  # Semantic failure reason
                         })
                         logger.warning(f"UUID {obj.uuid}: FAILED ({match_reason})")
 
@@ -156,7 +151,8 @@ class SemanticReplayer(VectorWaveReplayer):
                     "traceback": traceback.format_exc()
                 })
 
-        logger.info(f"Replay Finished. Passed: {results['passed']}, Failed: {results['failed']}, Updated: {results['updated']}")
+        logger.info(
+            f"Replay Finished. Passed: {results['passed']}, Failed: {results['failed']}, Updated: {results['updated']}")
         return results
 
     def _compare_results_semantic(self, expected: Any, actual: Any,
@@ -203,6 +199,7 @@ class SemanticReplayer(VectorWaveReplayer):
             norm1 = math.sqrt(sum(a * a for a in v1))
             norm2 = math.sqrt(sum(b * b for b in v2))
             return dot / (norm1 * norm2) if norm1 and norm2 else 0.0
+
         except Exception:
             return 0.0
 
@@ -220,13 +217,19 @@ class SemanticReplayer(VectorWaveReplayer):
         Respond JSON: {{"equivalent": true}} or {{"equivalent": false}}
         """
         try:
-            res = self.openai_client.chat.completions.create(
+            # Refactored to use create_chat_completion
+            response_text = self.openai_client.create_chat_completion(
                 model="gpt-4-turbo",
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                temperature=0.0
+                temperature=0.0,
+                category="semantic_replay"
             )
-            return json.loads(res.choices[0].message.content).get("equivalent", False)
+
+            if response_text:
+                return json.loads(response_text).get("equivalent", False)
+            return False
+
         except Exception as e:
             logger.error(f"LLM Eval failed: {e}")
             return False

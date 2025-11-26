@@ -3,6 +3,7 @@ import logging
 from ..database.db_search import search_functions
 from ..models.db_config import get_weaviate_settings
 from ..search.execution_search import find_by_trace_id
+from ..core.llm.factory import get_llm_client
 
 try:
     from openai import OpenAI
@@ -13,17 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_openai_client():
-    """Loads the OpenAI client (includes configuration check)."""
-    if OpenAI is None:
-        logger.error("OpenAI library not found. Install with 'pip install openai'.")
-        return None
-
-    settings = get_weaviate_settings()
-    if not settings.OPENAI_API_KEY:
-        logger.error("OPENAI_API_KEY is missing in environment variables.")
-        return None
-
-    return OpenAI(api_key=settings.OPENAI_API_KEY)
+    return get_llm_client()
 
 
 def search_and_answer(query: str, model: str = "gpt-4-turbo", language: str = "en") -> str:
@@ -82,15 +73,16 @@ def search_and_answer(query: str, model: str = "gpt-4-turbo", language: str = "e
         return msg if language == 'en' else "❌ OpenAI 클라이언트를 초기화할 수 없습니다. (.env 설정 확인 필요)"
 
     try:
-        response = client.chat.completions.create(
+        response_text = client.create_chat_completion(
             model=model,
             messages=[
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": user_message}
             ],
-            temperature=0.1
+            temperature=0.1,
+            category="rag_answer"
         )
-        return response.choices[0].message.content
+        return response_text if response_text else "❌ Failed to generate response."
 
     except Exception as e:
         logger.error(f"LLM generation failed: {e}")
@@ -146,15 +138,16 @@ def analyze_trace_log(trace_id: str, model: str = "gpt-4-turbo", language: str =
         return msg if language == 'en' else "❌ OpenAI 클라이언트 초기화 실패"
 
     try:
-        response = client.chat.completions.create(
+        response_text = client.create_chat_completion(
             model=model,
             messages=[
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": log_summary}
             ],
-            temperature=0.1
+            temperature=0.1,
+            category="trace_analysis"
         )
-        return response.choices[0].message.content
+        return response_text if response_text else "❌ Failed to generate analysis."
 
     except Exception as e:
         error_msg = f"❌ Error during analysis: {e}"

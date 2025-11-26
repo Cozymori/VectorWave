@@ -7,6 +7,7 @@ from ..models.db_config import get_weaviate_settings
 from ..batch.batch import get_batch_manager
 from ..vectorizer.factory import get_vectorizer
 from .decorator import PENDING_FUNCTIONS
+from .llm.factory import get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -15,20 +16,11 @@ try:
 except ImportError:
     OpenAI = None
 
-def _get_openai_client(settings):
-    if OpenAI is None:
-        logger.error("OpenAI library not installed. Install with 'pip install openai'.")
-        return None
-    if not settings.OPENAI_API_KEY:
-        logger.error("OPENAI_API_KEY is missing in .env.")
-        return None
-    return OpenAI(api_key=settings.OPENAI_API_KEY)
-
 
 def generate_metadata_via_llm(source_code: str, func_name: str) -> Optional[Dict[str, str]]:
     """Call LLM to generate description and narrative from source code."""
     settings = get_weaviate_settings()
-    client = _get_openai_client(settings)
+    client = get_llm_client()
     if not client:
         return None
 
@@ -47,17 +39,22 @@ def generate_metadata_via_llm(source_code: str, func_name: str) -> Optional[Dict
     """
 
     try:
-        response = client.chat.completions.create(
+        # Refactored to use BaseLLMClient interface
+        response_text = client.create_chat_completion(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are a technical documentation assistant. Output only JSON."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.0,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            category="auto_doc"
         )
-        content = response.choices[0].message.content
-        return json.loads(content)
+
+        if response_text:
+            return json.loads(response_text)
+        return None
+
     except Exception as e:
         logger.error(f"LLM generation failed for '{func_name}': {e}")
         return None

@@ -16,6 +16,7 @@ from weaviate.exceptions import WeaviateConnectionError as WeaviateClientConnect
 # Create module-level logger
 logger = logging.getLogger(__name__)
 
+
 # Code based on Weaviate v4 (latest) client.
 
 def get_weaviate_client(settings: WeaviateSettings) -> weaviate.WeaviateClient:
@@ -324,6 +325,36 @@ def create_execution_schema(client: weaviate.WeaviateClient, settings: WeaviateS
         raise SchemaCreationError(f"Error during execution schema creation: {e}")
 
 
+def create_usage_schema(client: weaviate.WeaviateClient, settings: WeaviateSettings):
+    """
+    API call token analysis schema
+    """
+    collection_name = "VectorWaveTokenUsage"
+
+    if client.collections.exists(collection_name):
+        return client.collections.get(collection_name)
+
+    logger.info("Creating collection '%s'", collection_name)
+
+    properties = [
+        wvc.Property(name="timestamp_utc", data_type=wvc.DataType.DATE),
+        wvc.Property(name="model", data_type=wvc.DataType.TEXT),
+        wvc.Property(name="usage_type", data_type=wvc.DataType.TEXT),  # "embedding", "generation" 등
+        wvc.Property(name="category", data_type=wvc.DataType.TEXT),  # "execution_log", "auto_doc" 등
+        wvc.Property(name="tokens", data_type=wvc.DataType.INT),
+    ]
+
+    try:
+        return client.collections.create(
+            name=collection_name,
+            properties=properties,
+            vectorizer_config=wvc.Configure.Vectorizer.none(),
+        )
+    except Exception as e:
+        logger.error(f"Error creating usage schema: {e}")
+        raise SchemaCreationError(f"Error during usage schema creation: {e}")
+
+
 def initialize_database():
     """
     Helper function to initialize both the client and the two schemas.
@@ -334,8 +365,8 @@ def initialize_database():
         if client:
             create_vectorwave_schema(client, settings)
             create_execution_schema(client, settings)
+            create_usage_schema(client, settings)
             return client
     except Exception as e:
         logger.error("Failed to initialize VectorWave database: %s", e)
         return None
-

@@ -1,5 +1,6 @@
 from .base import BaseVectorizer
 from typing import List
+from ..core.llm.factory import get_llm_client
 import logging
 
 logger = logging.getLogger(__name__)
@@ -21,16 +22,25 @@ class OpenAIVectorizer(BaseVectorizer):
         if not api_key:
             raise ValueError("OpenAI API key is required for OpenAIVectorizer.")
 
-        self.client = OpenAI(api_key=api_key)
+        self.client = get_llm_client()
         self.model = model
         logger.info("OpenAIVectorizer initialized with model '%s'.", self.model)
 
     def embed(self, text: str) -> List[float]:
         text = text.replace("\n", " ")
-        response = self.client.embeddings.create(input=[text], model=self.model)
-        return response.data[0].embedding
+        vector = self.client.create_embedding(
+            text=text,
+            model=self.model,
+            category="embedding"
+        )
+        return vector if vector else []
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        texts = [t.replace("\n", " ") for t in texts]
-        response = self.client.embeddings.create(input=texts, model=self.model)
-        return [d.embedding for d in response.data]
+        embeddings = []
+        for text in texts:
+            emb = self.embed(text)
+            if emb:
+                embeddings.append(emb)
+            else:
+                embeddings.append([])
+        return embeddings

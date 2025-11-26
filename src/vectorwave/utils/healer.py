@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from ..search.execution_search import find_executions
 from ..database.db_search import search_functions_hybrid
 from ..models.db_config import get_weaviate_settings
+from ..core.llm.factory import get_llm_client
 
 try:
     from openai import OpenAI
@@ -23,16 +24,7 @@ class VectorWaveHealer:
     def __init__(self, model: str = "gpt-4-turbo"):
         self.settings = get_weaviate_settings()
         self.model = model
-        self.client = self._init_openai()
-
-    def _init_openai(self) -> Optional[OpenAI]:
-        if OpenAI is None:
-            logger.error("'openai' library is not installed.")
-            return None
-        if not self.settings.OPENAI_API_KEY:
-            logger.error("OPENAI_API_KEY is not set.")
-            return None
-        return OpenAI(api_key=self.settings.OPENAI_API_KEY)
+        self.client = get_llm_client()
 
     def diagnose_and_heal(self, function_name: str, lookback_minutes: int = 60) -> str:
         """
@@ -85,15 +77,23 @@ class VectorWaveHealer:
         # 5. Call LLM
         print("🤖 Generating fix via LLM...")
         try:
-            response = self.client.chat.completions.create(
+            response_text = self.client.create_chat_completion(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are an expert Python debugger. Analyze the code and errors provided, then generate a fixed version of the code."},
+                    {"role": "system", "content": "You are an expert Python debugger."
+                                                  " Analyze the code and errors provided,"
+                                                  " then generate a fixed version of the code."},
                     {"role": "user", "content": prompt_context}
                 ],
-                temperature=0.1
+                temperature=0.1,
+                category="healer"
             )
-            return response.choices[0].message.content
+
+            if response_text:
+                return response_text
+            else:
+                return "❌ LLM returned no response."
+
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
             return f"❌ Error occurred during LLM call: {e}"

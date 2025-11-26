@@ -10,6 +10,7 @@ from ..models.db_config import get_weaviate_settings, WeaviateSettings
 from .db import get_cached_client
 from ..exception.exceptions import WeaviateConnectionError
 from ..vectorizer.factory import get_vectorizer
+from weaviate.classes.aggregate import Metrics
 
 import uuid
 from datetime import datetime
@@ -461,3 +462,34 @@ def simulate_drift_check(
     except Exception as e:
         logger.error(f"Simulation failed: {e}")
         return {"error": str(e)}
+
+
+def get_token_usage_stats() -> Dict[str, int]:
+    """VectorWaveTokenUsage collections based analysis"""
+    try:
+        client = get_cached_client()
+        if not client.collections.exists("VectorWaveTokenUsage"):
+            logger.warning("VectorWaveTokenUsage collection does not exist.")
+            return {"total_tokens": 0}
+
+        usage_col = client.collections.get("VectorWaveTokenUsage")
+
+        total_tokens = 0
+        stats = {}
+
+        for obj in usage_col.iterator():
+            props = obj.properties
+            tokens = int(props.get("tokens", 0))
+            category = props.get("category", "unknown")
+
+            total_tokens += tokens
+
+            cat_key = f"{category}_tokens"
+            stats[cat_key] = stats.get(cat_key, 0) + tokens
+
+        stats["total_tokens"] = total_tokens
+        return stats
+
+    except Exception as e:
+        logger.error(f"Stats error: {e}", exc_info=True)
+        return {}
