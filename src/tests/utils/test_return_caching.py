@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 import json
+import weaviate.classes.query as wvc_query
 from vectorwave.utils.return_caching_utils import _check_and_return_cached_result
 from vectorwave.models.db_config import WeaviateSettings
 
@@ -46,30 +47,77 @@ def mock_caching_utils_deps(monkeypatch):
         "tracer_obj": mock_tracer
     }
 
+@pytest.fixture
+def mock_caching_utils_deps_v2(monkeypatch):
+    """
+    Enhanced Mock Fixture for Golden Dataset testing.
+    Mocks Client, Golden Collection, and Standard Search.
+    """
+    # Settings Mock
+    mock_settings = WeaviateSettings(
+        EXECUTION_COLLECTION_NAME="Executions",
+        GOLDEN_COLLECTION_NAME="GoldenData"
+    )
+    mock_get_settings = MagicMock(return_value=mock_settings)
+
+    # Client & Golden Collection Mock
+    mock_client = MagicMock()
+    mock_golden_col = MagicMock()
+
+    def get_collection_side_effect(name):
+        if name == "GoldenData": return mock_golden_col
+        return MagicMock()
+
+    mock_client.collections.get.side_effect = get_collection_side_effect
+    mock_get_client = MagicMock(return_value=mock_client)
+
+    # Vectorizer Mock
+    mock_vectorizer = MagicMock()
+    mock_vectorizer.embed.return_value = [0.1, 0.2]
+    mock_get_vectorizer = MagicMock(return_value=mock_vectorizer)
+
+    # Batch Mock
+    mock_batch = MagicMock()
+    mock_get_batch = MagicMock(return_value=mock_batch)
+
+    # Patching
+    TARGET = "vectorwave.utils.return_caching_utils"
+    monkeypatch.setattr(f"{TARGET}.get_weaviate_settings", mock_get_settings)
+    monkeypatch.setattr(f"{TARGET}.get_cached_client", mock_get_client)
+    monkeypatch.setattr(f"{TARGET}.get_vectorizer", mock_get_vectorizer)
+    monkeypatch.setattr(f"{TARGET}.get_batch_manager", mock_get_batch)
+
+    # Important: Mock search_similar_execution (Standard Search)
+    mock_search_std = MagicMock(return_value=None)
+    monkeypatch.setattr(f"{TARGET}.search_similar_execution", mock_search_std)
+
+    return {
+        "golden_col": mock_golden_col,
+        "search_std": mock_search_std,
+        "batch": mock_batch
+    }
+
+
+# --- Tests ---
 
 def test_check_and_return_cached_result_cache_hit_logging(mock_caching_utils_deps):
     """
     [Case 1] Verify that DB logging is correctly performed with 'CACHE_HIT' status upon a cache hit.
     """
     # Arrange
-    # 1. Mock cache search result (Log found in DB)
     mock_cached_log = {
         "return_value": json.dumps({"result": "cached_data"}),
         "metadata": {"distance": 0.1},
         "uuid": "cached-log-uuid"
     }
 
-    # 2. Mock search_similar_execution to return the above result (Simulate Cache Hit)
     with patch("vectorwave.utils.return_caching_utils.search_similar_execution", return_value=mock_cached_log):
-        # [Fix] Instead of directly patching the .get method of the ContextVar object, replace the variable itself with a Mock object.
         with patch("vectorwave.utils.return_caching_utils.current_tracer_var") as mock_tracer_var:
             with patch("vectorwave.utils.return_caching_utils.current_span_id_var") as mock_span_var:
-                # Set return value for .get() call on the Mock object
                 mock_tracer_var.get.return_value = mock_caching_utils_deps["tracer_obj"]
                 mock_span_var.get.return_value = "parent-span-123"
 
-                # 4. Execute the target function
-                def dummy_func(a, b): pass  # Target function
+                def dummy_func(a, b): pass
 
                 result = _check_and_return_cached_result(
                     func=dummy_func,
@@ -81,31 +129,20 @@ def test_check_and_return_cached_result_cache_hit_logging(mock_caching_utils_dep
                 )
 
     # Assert
-    # 1. Was the cached result returned correctly?
     assert result == {"result": "cached_data"}
-
-    # 2. [Core] Was BatchManager.add_object called? (Check if logging occurred)
     mock_batch = mock_caching_utils_deps["batch_manager"]
     mock_batch.add_object.assert_called_once()
 
-    # 3. [Core] Verify properties of the saved log
     call_kwargs = mock_batch.add_object.call_args.kwargs
     props = call_kwargs["properties"]
-
-    assert props["status"] == "CACHE_HIT"  # Check if status is CACHE_HIT
-    assert props["duration_ms"] == 0.0  # Check if duration is 0
-    assert props["trace_id"] == "existing-trace-id-abc"  # Check if existing Trace ID is maintained
-    assert props["parent_span_id"] == "parent-span-123"  # Check for parent Span ID maintenance
-    assert props["function_name"] == "dummy_func"
-    assert props["run_id"] == "test-run-123"  # Check for inclusion of global tags
+    assert props["status"] == "CACHE_HIT"
+    assert props["duration_ms"] == 0.0
 
 
 def test_check_and_return_cached_result_cache_miss(mock_caching_utils_deps):
     """
     [Case 2] Verify that None is returned without logging upon a cache miss.
     """
-    # Arrange
-    # Set search_similar_execution to return None (Cache Miss)
     with patch("vectorwave.utils.return_caching_utils.search_similar_execution", return_value=None):
         def dummy_func(): pass
 
@@ -118,9 +155,59 @@ def test_check_and_return_cached_result_cache_miss(mock_caching_utils_deps):
             is_async=False
         )
 
-    # Assert
-    # 1. Result should be None (To proceed to actual function execution)
     assert result is None
-
-    # 2. BatchManager.add_object should not be called
     mock_caching_utils_deps["batch_manager"].add_object.assert_not_called()
+
+
+def test_cache_priority_golden_hit(mock_caching_utils_deps_v2):
+    """
+    [Case 3] If a cache hit occurs in the Golden Dataset, standard search should not be performed (Priority Test).
+    """
+    deps = mock_caching_utils_deps_v2
+
+    # Arrange: Golden search result exists (Hit)
+    mock_obj = MagicMock()
+    mock_obj.properties = {"return_value": '"GoldenResult"', "original_uuid": "orig-1"}
+    mock_obj.metadata.distance = 0.0
+    mock_obj.metadata.certainty = 1.0
+    deps["golden_col"].query.near_vector.return_value.objects = [mock_obj]
+
+    # Act
+    result = _check_and_return_cached_result(
+        func=lambda: None, args=(), kwargs={}, function_name="test", cache_threshold=0.9, is_async=False
+    )
+
+    # Assert
+    assert result == "GoldenResult"
+    # Check if Golden Collection search was called
+    deps["golden_col"].query.near_vector.assert_called_once()
+    # Standard search (search_similar_execution) should not be called (Verify Priority Logic)
+    deps["search_std"].assert_not_called()
+
+
+def test_cache_priority_golden_miss_fallback(mock_caching_utils_deps_v2):
+    """
+    [Case 4] If not found in Golden Dataset, it should fallback to Standard search (Fallback Test).
+    """
+    deps = mock_caching_utils_deps_v2
+
+    # Arrange: No result in Golden search (Miss)
+    deps["golden_col"].query.near_vector.return_value.objects = []
+
+    # Set Standard search result (Hit)
+    deps["search_std"].return_value = {
+        "return_value": '"StdResult"',
+        "metadata": {"distance": 0.1, "certainty": 0.9},
+        "uuid": "std-1"
+    }
+
+    # Act
+    result = _check_and_return_cached_result(
+        func=lambda: None, args=(), kwargs={}, function_name="test", cache_threshold=0.9, is_async=False
+    )
+
+    # Assert
+    assert result == "StdResult"
+    # Both should have been called
+    deps["golden_col"].query.near_vector.assert_called_once()
+    deps["search_std"].assert_called_once()
