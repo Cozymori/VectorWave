@@ -210,6 +210,7 @@ def search_executions(
         results = []
         for obj in response.objects:
             props = obj.properties.copy()
+            props['uuid'] = str(obj.uuid)
             for key, value in props.items():
                 if isinstance(value, uuid.UUID) or isinstance(value, datetime):
                     props[key] = str(value)
