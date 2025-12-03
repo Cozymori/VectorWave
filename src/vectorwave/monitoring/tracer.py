@@ -190,22 +190,17 @@ def _deserialize_return_value(return_value_str: Optional[str]) -> Any:
     """
     Attempts to deserialize a return value string (stored in DB)
     back to a Python object.
+    [FIX] Now attempts json.loads for ALL strings to correctly unquote simple strings.
     """
     if return_value_str is None:
         return None
 
     try:
-        # Check if it was serialized as a JSON string (for dicts, lists, complex objects)
-        if return_value_str.strip().startswith('{') or return_value_str.strip().startswith('['):
-            return json.loads(return_value_str)
-
-        # Simple types or plain strings are returned as is.
-        return return_value_str
-
-    except json.JSONDecodeError:
-        return return_value_str
-    except Exception as e:
-        logger.warning(f"Failed to deserialize return value: {e}. Returning raw string.")
+        # Try to deserialize everything (dicts, lists, and quoted strings like '"result"')
+        return json.loads(return_value_str)
+    except (json.JSONDecodeError, TypeError):
+        # Fallback: If it's a raw string that wasn't JSON encoded or failed
+        # e.g., "Plain String" without quotes
         return return_value_str
 
 
