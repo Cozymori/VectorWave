@@ -8,6 +8,7 @@ from .core.generator import generate_and_register_metadata
 from .utils.healer import VectorWaveHealer
 from .utils.replayer import VectorWaveReplayer
 from .utils.replayer_semantic import SemanticReplayer
+from .database.dataset import VectorWaveDatasetManager
 
 __all__ = [
     'vectorize',
@@ -22,5 +23,6 @@ __all__ = [
     'generate_and_register_metadata',
     'VectorWaveHealer',
     'VectorWaveReplayer',
-    'SemanticReplayer'
+    'SemanticReplayer',
+    'VectorWaveDatasetManager'
 ]
