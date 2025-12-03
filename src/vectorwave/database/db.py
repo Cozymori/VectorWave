@@ -325,6 +325,41 @@ def create_execution_schema(client: weaviate.WeaviateClient, settings: WeaviateS
         raise SchemaCreationError(f"Error during execution schema creation: {e}")
 
 
+def create_golden_dataset_schema(client: weaviate.WeaviateClient, settings: WeaviateSettings):
+    """
+    Creates a collection to store Golden Data (Best Practice/Ground Truth).
+    """
+    collection_name = settings.GOLDEN_COLLECTION_NAME
+
+    if client.collections.exists(collection_name):
+        logger.info("Collection '%s' already exists.", collection_name)
+        return client.collections.get(collection_name)
+
+    logger.info("Creating collection '%s'", collection_name)
+
+    properties = [
+        wvc.Property(name="original_uuid", data_type=wvc.DataType.TEXT,
+                     description="UUID of the original execution log"),
+        wvc.Property(name="function_name", data_type=wvc.DataType.TEXT),
+        wvc.Property(name="function_uuid", data_type=wvc.DataType.UUID),
+
+        wvc.Property(name="return_value", data_type=wvc.DataType.TEXT),
+
+        wvc.Property(name="note", data_type=wvc.DataType.TEXT, description="User notes or reason for selection"),
+        wvc.Property(name="created_at", data_type=wvc.DataType.DATE),
+        wvc.Property(name="tags", data_type=wvc.DataType.TEXT_ARRAY, description="Tags like ['edge-case', 'baseline']")
+    ]
+
+    try:
+        return client.collections.create(
+            name=collection_name,
+            properties=properties,
+            vectorizer_config=wvc.Configure.Vectorizer.none(),
+        )
+    except Exception as e:
+        raise SchemaCreationError(f"Error creating Golden Dataset schema: {e}")
+
+
 def create_usage_schema(client: weaviate.WeaviateClient, settings: WeaviateSettings):
     """
     API call token analysis schema
@@ -366,6 +401,7 @@ def initialize_database():
             create_vectorwave_schema(client, settings)
             create_execution_schema(client, settings)
             create_usage_schema(client, settings)
+            create_golden_dataset_schema(client, settings)
             return client
     except Exception as e:
         logger.error("Failed to initialize VectorWave database: %s", e)
