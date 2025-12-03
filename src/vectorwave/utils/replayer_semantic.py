@@ -24,8 +24,7 @@ logger = logging.getLogger(__name__)
 class SemanticReplayer(VectorWaveReplayer):
     """
     A subclass of VectorWaveReplayer that adds AI-powered semantic comparison capabilities.
-    It supports Vector Cosine Similarity and LLM-as-a-Judge evaluation.
-    Location: src/vectorwave/utils/replayer_semantic.py
+    Updated to prioritize 'Golden Data' using the parent's data fetching logic.
     """
 
     def __init__(self):
@@ -40,11 +39,10 @@ class SemanticReplayer(VectorWaveReplayer):
                semantic_eval: bool = False
                ) -> Dict[str, Any]:
         """
-        Retrieves past execution history of a specific function, re-executes it (Replay),
-        and validates the result using semantic comparison options.
-        Returns a dictionary containing diff_html for UI visualization.
+        Retrieves past execution history (Golden > Standard), re-executes it,
+        and validates the result using semantic comparison.
         """
-        # 1. Dynamic Function Loading (Dynamic Import)
+        # 1. Dynamic Function Loading
         try:
             module_name, func_short_name = function_full_name.rsplit('.', 1)
             module = importlib.import_module(module_name)
@@ -55,19 +53,8 @@ class SemanticReplayer(VectorWaveReplayer):
 
         is_async_func = inspect.iscoroutinefunction(target_func)
 
-        # 2. Retrieve Test Data (Past Logs) from DB
-        collection = self.client.collections.get(self.collection_name)
-
-        filters = (
-                wvc_query.Filter.by_property("function_name").equal(func_short_name) &
-                wvc_query.Filter.by_property("status").equal("SUCCESS")
-        )
-
-        response = collection.query.fetch_objects(
-            filters=filters,
-            limit=limit,
-            sort=wvc_query.Sort.by_property("timestamp_utc", ascending=False)
-        )
+        # 2. Retrieve Test Data using Parent's Logic (Golden Priority)
+        test_objects = self._fetch_test_candidates(func_short_name, limit)
 
         results = {
             "function": function_full_name,
@@ -78,21 +65,27 @@ class SemanticReplayer(VectorWaveReplayer):
             "failures": []
         }
 
-        if not response.objects:
+        if not test_objects:
             logger.warning(f"No data found to test: {function_full_name}")
             return results
 
-        logger.info(f"Starting Semantic Replay: {len(response.objects)} logs for '{function_full_name}'")
+        logger.info(f"Starting Semantic Replay: {len(test_objects)} logs for '{function_full_name}'")
         if similarity_threshold:
             logger.info(f"   - Mode: Vector Similarity >= {similarity_threshold}")
         if semantic_eval:
             logger.info(f"   - Mode: Semantic Evaluation (LLM-as-a-Judge)")
 
-        for obj in response.objects:
+        for obj_data in test_objects:
             results["total"] += 1
 
-            inputs = self._extract_inputs(obj.properties, target_func)
-            expected_output = self._deserialize_value(obj.properties.get("return_value"))
+            # Unpack data
+            uuid_str = obj_data['uuid']
+            raw_inputs = obj_data['inputs']
+            expected_output = obj_data['expected_output']
+            is_golden = obj_data.get('is_golden', False)
+
+            # [FIX] Extract inputs using parent method
+            inputs = self._extract_inputs(raw_inputs, target_func)
 
             try:
                 # 3. Function Re-execution
@@ -111,43 +104,43 @@ class SemanticReplayer(VectorWaveReplayer):
 
                 if is_match:
                     results["passed"] += 1
-                    logger.debug(f"UUID {obj.uuid}: PASSED ({match_reason})")
+                    logger.debug(f"UUID {uuid_str}: PASSED ({match_reason}) {'[GOLDEN]' if is_golden else ''}")
                 else:
                     # 5. Handle Mismatch
                     if update_baseline:
-                        self._update_baseline_value(collection, obj.uuid, actual_output)
+                        self._update_baseline_value(uuid_str, actual_output, is_golden)
                         results["updated"] += 1
                         results["passed"] += 1
-                        logger.info(f"UUID {obj.uuid}: Baseline UPDATED")
+                        logger.info(f"UUID {uuid_str}: Baseline UPDATED")
                     else:
                         results["failed"] += 1
 
-                        # Generate Visual Diff (inherited from parent)
+                        # Generate Visual Diff
                         diff_html = self._generate_diff_html(expected_output, actual_output)
 
                         results["failures"].append({
-                            "uuid": str(obj.uuid),
+                            "uuid": uuid_str,
                             "inputs": inputs,
                             "expected": expected_output,
                             "actual": actual_output,
-                            "diff_html": diff_html,  # UI visualization field
-                            "reason": match_reason  # Semantic failure reason
+                            "diff_html": diff_html,
+                            "reason": match_reason,
+                            "is_golden": is_golden
                         })
-                        logger.warning(f"UUID {obj.uuid}: FAILED ({match_reason})")
+                        logger.warning(f"UUID {uuid_str}: FAILED ({match_reason}) {'[GOLDEN]' if is_golden else ''}")
 
             except Exception as e:
                 results["failed"] += 1
                 error_msg = f"Exception: {str(e)}"
-                logger.error(f"UUID {obj.uuid}: EXECUTION ERROR - {e}")
+                logger.error(f"UUID {uuid_str}: EXECUTION ERROR - {e}")
 
                 results["failures"].append({
-                    "uuid": str(obj.uuid),
+                    "uuid": uuid_str,
                     "inputs": inputs,
                     "expected": expected_output,
                     "actual": "EXCEPTION_RAISED",
                     "error": error_msg,
-                    "diff_html": f"<div class='error' style='color:red; padding:10px; border:1px solid red; background:#fff0f0;"
-                                 f"'><strong>Runtime Error:</strong><pre>{traceback.format_exc()}</pre></div>",
+                    "diff_html": f"<div class='error'>{traceback.format_exc()}</div>",
                     "traceback": traceback.format_exc()
                 })
 
