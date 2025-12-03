@@ -13,7 +13,9 @@ def clear_database():
 
     collections = [
         settings.COLLECTION_NAME,
-        settings.EXECUTION_COLLECTION_NAME  # VectorWaveExecutions
+        settings.EXECUTION_COLLECTION_NAME,
+        settings.GOLDEN_COLLECTION_NAME,
+
     ]
 
     for col_name in collections:
