@@ -25,46 +25,62 @@ def mock_caching_deps(monkeypatch):
     Mocks core dependencies for semantic caching testing.
     Mocking path: vectorwave.utils.return_caching_utils
     """
-    # 1. Mock BatchManager (Used to verify log saving)
+    # 1. Mock BatchManager
     mock_batch_manager = MagicMock()
     mock_batch_manager.add_object = MagicMock()
     mock_get_batch_manager = MagicMock(return_value=mock_batch_manager)
 
-    # 2. Mock Vectorizer (Provides dummy vector)
+    # 2. Mock Vectorizer
     mock_vectorizer = MagicMock()
-    mock_vectorizer.embed.return_value = [0.1, 0.2, 0.3] # Dummy vector
+    mock_vectorizer.embed.return_value = [0.1, 0.2, 0.3]
     mock_get_vectorizer = MagicMock(return_value=mock_vectorizer)
 
     # 3. Mock Settings
     mock_settings = WeaviateSettings(
         COLLECTION_NAME="TestFunctions",
         EXECUTION_COLLECTION_NAME="TestExecutions",
+        GOLDEN_COLLECTION_NAME="TestGolden",  # Ensure this is set
         global_custom_values={"run_id": "test-run-cache"},
-        sensitive_keys={"secret_key"} # For sensitive data masking test
+        sensitive_keys={"secret_key"}
     )
     mock_get_settings = MagicMock(return_value=mock_settings)
 
-    # 4. Mock Weaviate Client (For BatchManager initialization)
+    # 4. Mock Weaviate Client (Crucial Fix)
     mock_client = MagicMock()
+
+    # Setup mock for Golden Dataset query chain:
+    # client.collections.get().query.near_vector() -> returns empty objects list by default
+    mock_collection = MagicMock()
+    mock_query = MagicMock()
+    mock_response = MagicMock()
+    mock_response.objects = []  # Default to no golden hit
+
+    mock_query.near_vector.return_value = mock_response
+    mock_collection.query = mock_query
+    mock_client.collections.get.return_value = mock_collection
+
     mock_get_client = MagicMock(return_value=mock_client)
 
-    # 5. Mock DB Search (Core of caching)
-    mock_search_similar_execution = MagicMock(return_value=None) # Default value: Cache Miss
+    # 5. Mock DB Search (Standard Cache)
+    mock_search_similar_execution = MagicMock(return_value=None)
 
     # --- Apply Mocking ---
+
+    MOCK_PATH = "vectorwave.utils.return_caching_utils"
+
+    # [FIX] Mock get_cached_client in return_caching_utils
+    monkeypatch.setattr(f"{MOCK_PATH}.get_cached_client", mock_get_client)
+
+    monkeypatch.setattr(f"{MOCK_PATH}.get_weaviate_settings", mock_get_settings)
+    monkeypatch.setattr(f"{MOCK_PATH}.get_vectorizer", mock_get_vectorizer)
+    monkeypatch.setattr(f"{MOCK_PATH}.search_similar_execution", mock_search_similar_execution)
 
     # Core/Decorator Dependencies
     monkeypatch.setattr("vectorwave.core.decorator.get_batch_manager", mock_get_batch_manager)
     monkeypatch.setattr("vectorwave.core.decorator.get_weaviate_settings", mock_get_settings)
     monkeypatch.setattr("vectorwave.core.decorator.get_vectorizer", mock_get_vectorizer)
 
-    # Caching Utils Dependencies (Using the correct path)
-    MOCK_PATH = "vectorwave.utils.return_caching_utils"
-    monkeypatch.setattr(f"{MOCK_PATH}.get_weaviate_settings", mock_get_settings)
-    monkeypatch.setattr(f"{MOCK_PATH}.get_vectorizer", mock_get_vectorizer)
-    monkeypatch.setattr(f"{MOCK_PATH}.search_similar_execution", mock_search_similar_execution)
-
-    # Tracer Dependencies (For successful log saving)
+    # Tracer Dependencies
     monkeypatch.setattr("vectorwave.monitoring.tracer.get_batch_manager", mock_get_batch_manager)
     monkeypatch.setattr("vectorwave.monitoring.tracer.get_weaviate_settings", mock_get_settings)
     monkeypatch.setattr("vectorwave.monitoring.tracer.get_vectorizer", mock_get_vectorizer)
@@ -79,12 +95,12 @@ def mock_caching_deps(monkeypatch):
     real_get_settings.cache_clear()
     real_get_vectorizer.cache_clear()
 
-
     return {
         "batch": mock_batch_manager,
         "vectorizer": mock_vectorizer,
         "search_cache": mock_search_similar_execution,
-        "settings": mock_settings
+        "settings": mock_settings,
+        "client": mock_client  # Return client if you need to manipulate golden cache results in tests
     }
 
 

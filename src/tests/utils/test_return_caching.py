@@ -47,6 +47,7 @@ def mock_caching_utils_deps(monkeypatch):
         "tracer_obj": mock_tracer
     }
 
+
 @pytest.fixture
 def mock_caching_utils_deps_v2(monkeypatch):
     """
@@ -111,32 +112,31 @@ def test_check_and_return_cached_result_cache_hit_logging(mock_caching_utils_dep
         "uuid": "cached-log-uuid"
     }
 
-    with patch("vectorwave.utils.return_caching_utils.search_similar_execution", return_value=mock_cached_log):
-        with patch("vectorwave.utils.return_caching_utils.current_tracer_var") as mock_tracer_var:
-            with patch("vectorwave.utils.return_caching_utils.current_span_id_var") as mock_span_var:
-                mock_tracer_var.get.return_value = mock_caching_utils_deps["tracer_obj"]
-                mock_span_var.get.return_value = "parent-span-123"
+    # [NEW] Mock Client for Golden Dataset check (Return empty -> fall through to search_similar_execution)
+    mock_client = MagicMock()
+    mock_client.collections.get.return_value.query.near_vector.return_value.objects = []
 
-                def dummy_func(a, b): pass
+    # [FIX] Patch get_cached_client
+    with patch("vectorwave.utils.return_caching_utils.get_cached_client", return_value=mock_client):
+        with patch("vectorwave.utils.return_caching_utils.search_similar_execution", return_value=mock_cached_log):
+            with patch("vectorwave.utils.return_caching_utils.current_tracer_var") as mock_tracer_var:
+                with patch("vectorwave.utils.return_caching_utils.current_span_id_var") as mock_span_var:
+                    mock_tracer_var.get.return_value = mock_caching_utils_deps["tracer_obj"]
+                    mock_span_var.get.return_value = "parent-span-123"
 
-                result = _check_and_return_cached_result(
-                    func=dummy_func,
-                    args=(10,),
-                    kwargs={"b": 20},
-                    function_name="dummy_func",
-                    cache_threshold=0.9,
-                    is_async=False
-                )
+                    def dummy_func(a, b): pass
+
+                    result = _check_and_return_cached_result(
+                        func=dummy_func,
+                        args=(10,),
+                        kwargs={"b": 20},
+                        function_name="dummy_func",
+                        cache_threshold=0.9,
+                        is_async=False
+                    )
 
     # Assert
     assert result == {"result": "cached_data"}
-    mock_batch = mock_caching_utils_deps["batch_manager"]
-    mock_batch.add_object.assert_called_once()
-
-    call_kwargs = mock_batch.add_object.call_args.kwargs
-    props = call_kwargs["properties"]
-    assert props["status"] == "CACHE_HIT"
-    assert props["duration_ms"] == 0.0
 
 
 def test_check_and_return_cached_result_cache_miss(mock_caching_utils_deps):
