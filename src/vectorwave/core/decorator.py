@@ -11,6 +11,7 @@ from ..monitoring.tracer import trace_root, trace_span
 from ..utils.function_cache import function_cache_manager
 from ..utils.return_caching_utils import _check_and_return_cached_result
 from ..vectorizer.factory import get_vectorizer
+from ..utils.context import execution_source_context
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ def vectorize(search_description: Optional[str] = None,
         func_uuid = generate_uuid5(func_identifier)
 
         # Prepare attributes to capture
-        final_attributes = ['function_uuid', 'team', 'priority', 'run_id']
+        final_attributes = ['function_uuid', 'team', 'priority', 'run_id', 'exec_source']
         if attributes_to_capture:
             for attr in attributes_to_capture:
                 if attr not in final_attributes:
@@ -145,7 +146,7 @@ def vectorize(search_description: Optional[str] = None,
             async def inner_wrapper(*args, **kwargs):
                 # Remove injected tags from kwargs before calling original func
                 clean_kwargs = {k: v for k, v in kwargs.items() if
-                                k not in valid_execution_tags and k != 'function_uuid'}
+                                k not in valid_execution_tags and k != 'function_uuid' and k != 'exec_source'}
                 return await func(*args, **clean_kwargs)
 
             @wraps(func)
@@ -157,6 +158,7 @@ def vectorize(search_description: Optional[str] = None,
                 full_kwargs = kwargs.copy()
                 full_kwargs.update(valid_execution_tags)
                 full_kwargs['function_uuid'] = func_uuid
+                full_kwargs['exec_source'] = execution_source_context.get()
                 return await inner_wrapper(*args, **full_kwargs)
 
             return outer_wrapper
@@ -167,7 +169,7 @@ def vectorize(search_description: Optional[str] = None,
             @wraps(func)
             def inner_wrapper(*args, **kwargs):
                 clean_kwargs = {k: v for k, v in kwargs.items() if
-                                k not in valid_execution_tags and k != 'function_uuid'}
+                                k not in valid_execution_tags and k != 'function_uuid' and k != 'exec_source'}
                 return func(*args, **clean_kwargs)
 
             @wraps(func)
@@ -179,6 +181,7 @@ def vectorize(search_description: Optional[str] = None,
                 full_kwargs = kwargs.copy()
                 full_kwargs.update(valid_execution_tags)
                 full_kwargs['function_uuid'] = func_uuid
+                full_kwargs['exec_source'] = execution_source_context.get()
                 return inner_wrapper(*args, **full_kwargs)
 
             return outer_wrapper
