@@ -15,6 +15,7 @@ from ..models.db_config import get_weaviate_settings, WeaviateSettings
 from .alert.factory import get_alerter
 from ..vectorizer.factory import get_vectorizer
 from ..database.db_search import check_semantic_drift
+from ..utils.context import execution_source_context
 
 # Create module-level logger
 logger = logging.getLogger(__name__)
@@ -137,7 +138,8 @@ def _create_span_properties(
         "status": status,
         "error_message": error_msg,
         "error_code": error_code,
-        "return_value": return_value_to_log
+        "return_value": return_value_to_log,
+        "exec_source": execution_source_context.get()
     }
 
     if tracer.settings.global_custom_values:
