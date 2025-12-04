@@ -121,3 +121,34 @@ def find_by_trace_id(trace_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         sort_ascending=True,  # Sort chronologically
         limit=limit
     )
+
+
+def find_replay_executions(
+        limit: int = 20,
+        status: Optional[str] = None,
+        function_name: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Searches specifically for logs generated during a Replay session.
+
+    Args:
+        limit: Max number of logs to retrieve.
+        status: Optional filter for 'SUCCESS' or 'ERROR'.
+        function_name: Optional filter for specific function name.
+    """
+    logger.info(f"\n--- Searching for REPLAY Executions (Status: {status}, Func: {function_name}) ---")
+
+    filters = {"exec_source": "REPLAY"}
+
+    if status:
+        filters["status"] = status
+
+    if function_name:
+        filters["function_name"] = function_name
+
+    return find_executions(
+        filters=filters,
+        sort_by="timestamp_utc",
+        sort_ascending=False,
+        limit=limit
+    )
