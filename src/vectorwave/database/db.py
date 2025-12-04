@@ -282,6 +282,11 @@ def create_execution_schema(client: weaviate.WeaviateClient, settings: WeaviateS
             name="return_value",
             data_type=wvc.DataType.TEXT,
             description="The JSON-serialized or str() representation of the function's return value"
+        ),
+        wvc.Property(
+            name="exec_source",
+            data_type=wvc.DataType.TEXT,
+            description="Source of execution: 'REALTIME' (User traffic) or 'REPLAY' (Regression Test)"
         )
     ]
 
