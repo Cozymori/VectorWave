@@ -6,6 +6,8 @@ import math
 import asyncio
 import inspect
 from typing import Any, Dict, List, Optional
+
+from .context import execution_source_context
 from ..core.llm.factory import get_llm_client
 
 import weaviate.classes.query as wvc_query
@@ -88,11 +90,15 @@ class SemanticReplayer(VectorWaveReplayer):
             inputs = self._extract_inputs(raw_inputs, target_func)
 
             try:
+                token = execution_source_context.set("REPLAY")
                 # 3. Function Re-execution
                 if is_async_func:
                     actual_output = asyncio.run(target_func(**inputs))
                 else:
                     actual_output = target_func(**inputs)
+
+                if token:
+                    execution_source_context.reset(token)
 
                 # 4. Result Validation (Semantic Comparison)
                 is_match, match_reason = self._compare_results_semantic(

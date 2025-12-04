@@ -13,6 +13,7 @@ import weaviate.classes.query as wvc_query
 from ..database.db import get_cached_client
 from ..models.db_config import get_weaviate_settings
 from ..monitoring.tracer import _mask_and_serialize
+from .context import execution_source_context
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,10 @@ class VectorWaveReplayer:
             # [FIX] Extract only valid arguments for the target function
             inputs = self._extract_inputs(raw_inputs, target_func)
 
+            token = None
             try:
+                token = execution_source_context.set("REPLAY")
+
                 # 3. Function Re-execution
                 if is_async_func:
                     actual_output = asyncio.run(target_func(**inputs))
@@ -126,6 +130,10 @@ class VectorWaveReplayer:
                     "diff_html": f"<div class='error'>{traceback.format_exc()}</div>",
                     "traceback": traceback.format_exc()
                 })
+
+            finally:
+                if token:
+                    execution_source_context.reset(token)
 
         logger.info(f"Replay Finished. Passed: {results['passed']}, Failed: {results['failed']}")
         return results
