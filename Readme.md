@@ -592,6 +592,40 @@ archiver.export_and_clear(
 {"messages": [{"role": "user", "content": "{\"price\": 100, \"tax\": 0.1}"}, {"role": "assistant", "content": "110.0"}]}
 ```
 
+## 🌊 Auto-Injection (Zero-Code Change Integration)
+
+You don't need to modify your business logic to use VectorWave. Use `VectorWaveAutoInjector` to inject functionality externally.
+
+### How to use
+
+1. **Configure Global Settings**: Set default values like `team`, `priority`, or `auto` (pending mode).
+2. **Inject Modules**: Specify the target module path string.
+
+```python
+from vectorwave import initialize_database, VectorWaveAutoInjector, generate_and_register_metadata
+
+# 1. Initialize DB
+initialize_database()
+
+# 2. Configure AutoInjector (Global Settings)
+VectorWaveAutoInjector.configure(
+    team="billing-team",
+    priority=1,
+    auto=True  # True: Collect metadata in memory (Pending), False: Save immediately to DB
+)
+
+# 3. Inject VectorWave into your module
+# (No need to add @vectorize decorators in 'my_service.payment' code!)
+VectorWaveAutoInjector.inject("my_service.payment")
+
+# 4. Register Metadata (If auto=True)
+generate_and_register_metadata()
+
+# 5. Run your business logic
+import my_service.payment
+my_service.payment.process_transaction()
+```
+
 ## 🤝 Contributing
 
 We welcome all forms of contributions, including bug reports, feature requests, and code contributions. Please refer to [CONTRIBUTING.md](https://www.google.com/search?q=httpsS://www.google.com/search%3Fq%3DCONTRIBUTING.md) for details.
