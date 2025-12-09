@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vectorwave"
-version = "0.2.03"
+version = "0.2.04"
 authors = [
     { name = "junyeonggim", email = "junyeonggim5@gmail.com" },
 ]
