@@ -161,6 +161,7 @@ def vectorize(search_description: Optional[str] = None,
                 full_kwargs['exec_source'] = execution_source_context.get()
                 return await inner_wrapper(*args, **full_kwargs)
 
+            outer_wrapper._is_vectorized = True
             return outer_wrapper
 
         else:  # Sync wrapper
@@ -184,6 +185,7 @@ def vectorize(search_description: Optional[str] = None,
                 full_kwargs['exec_source'] = execution_source_context.get()
                 return inner_wrapper(*args, **full_kwargs)
 
+            outer_wrapper._is_vectorized = True
             return outer_wrapper
 
     return decorator
