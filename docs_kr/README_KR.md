@@ -591,6 +591,42 @@ archiver.export_and_clear(
 {"messages": [{"role": "user", "content": "{\"price\": 100, \"tax\": 0.1}"}, {"role": "assistant", "content": "110.0"}]}
 ```
 
+
+## 🌊 자동 주입 (Auto-Injection): 코드 수정 없는 통합
+
+비즈니스 로직 코드를 직접 수정하지 않고도 `VectorWaveAutoInjector`를 사용하여 외부에서 `VectorWave` 기능을 주입할 수 있습니다.
+
+### 사용 방법
+
+1.  **전역 설정 (Configure):** `team`, `priority`, `auto` (대기 모드) 등 기본값을 설정합니다.
+2.  **모듈 주입 (Inject):** 대상 모듈의 경로(문자열)를 지정하여 주입합니다.
+
+```python
+from vectorwave import initialize_database, VectorWaveAutoInjector, generate_and_register_metadata
+
+# 1. DB 초기화
+initialize_database()
+
+# 2. AutoInjector 설정 (전역 설정)
+VectorWaveAutoInjector.configure(
+    team="billing-team",
+    priority=1,
+    auto=True  # True: 메타데이터를 메모리에 대기(Pending), False: 즉시 DB 저장
+)
+
+# 3. 모듈에 VectorWave 주입
+# ('my_service.payment' 코드 내에 @vectorize를 붙일 필요가 없습니다!)
+VectorWaveAutoInjector.inject("my_service.payment")
+
+# 4. 메타데이터 등록 (auto=True인 경우 필수)
+# 서버 시작 전이나 로직 실행 전에 호출하여 DB에 함수 정보를 저장합니다.
+generate_and_register_metadata()
+
+# 5. 비즈니스 로직 실행
+import my_service.payment
+my_service.payment.process_transaction()
+```
+
 ## 🤝 기여 (Contributing)
 
 버그 보고, 기능 요청, 코드 기여 등 모든 형태의 기여를 환영합니다. 자세한 내용은 [CONTRIBUTING.md](https://www.google.com/search?q=httpsS://www.google.com/search%3Fq%3DCONTRIBUTING.md)를 참고해 주세요.
