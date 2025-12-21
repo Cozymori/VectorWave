@@ -1,10 +1,11 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
 
 [project]
 name = "vectorwave"
-version = "0.2.04"
+version = "0.2.05"
 authors = [
     { name = "junyeonggim", email = "junyeonggim5@gmail.com" },
 ]
@@ -18,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
     "Operating System :: OS Independent",
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -34,5 +36,8 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/cozymori/vectorwave"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.maturin]
+python-source = "src"
+module-name = "vectorwave.vectorwave_core"
+manifest-path = "crates/Cargo.toml"
+features = ["pyo3/extension-module"]
