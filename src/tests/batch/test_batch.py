@@ -123,7 +123,7 @@ def test_flush_batch_sends_to_weaviate(mock_deps):
     ]
 
     # Manually trigger flush
-    manager._flush_batch(items)
+    manager._flush_batch_core(items)
 
     # Check if dynamic batch context was entered
     mock_deps["client"].batch.dynamic.assert_called_once()
@@ -153,7 +153,7 @@ def test_flush_batch_reconnects_if_disconnected(mock_deps):
     items = [{"collection": "C1", "properties": {}, "uuid": "u1", "vector": None}]
 
     # Trigger flush
-    manager._flush_batch(items)
+    manager._flush_batch_core(items)
 
     # Should try to reconnect
     mock_deps["get_client"].assert_called_once()
