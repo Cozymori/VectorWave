@@ -12,7 +12,7 @@ import weaviate.classes.query as wvc_query
 
 from ..database.db import get_cached_client
 from ..models.db_config import get_weaviate_settings
-from ..monitoring.tracer import _mask_and_serialize
+import vectorwave.vectorwave_core as vectorwave_core
 from .context import execution_source_context
 
 logger = logging.getLogger(__name__)
@@ -238,7 +238,7 @@ class VectorWaveReplayer:
         collection_name = self.golden_collection_name if is_golden else self.collection_name
         collection = self.client.collections.get(collection_name)
 
-        processed_val = _mask_and_serialize(new_value, set())
+        processed_val = vectorwave_core.mask_and_serialize(new_value, [])
         try:
             val_str = json.dumps(processed_val)
         except (TypeError, ValueError):

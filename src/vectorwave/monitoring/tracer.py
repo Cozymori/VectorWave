@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any, Callable
 from uuid import uuid4
 from datetime import datetime, timezone
 
+import vectorwave.vectorwave_core as vectorwave_core
 from .alert.base import BaseAlerter
 from ..batch.batch import get_batch_manager
 from ..models.db_config import get_weaviate_settings, WeaviateSettings
@@ -34,31 +35,6 @@ current_tracer_var: ContextVar[Optional[TraceCollector]] = ContextVar('current_t
 current_span_id_var: ContextVar[Optional[str]] = ContextVar('current_span_id', default=None)
 
 
-def _mask_and_serialize(data: Any, sensitive_keys: set) -> Any:
-    """
-    Recursively masks sensitive data in dicts/lists and prepares for serialization.
-    """
-    if isinstance(data, dict):
-        new_dict = {}
-        for k, v in data.items():
-            if str(k).lower() in sensitive_keys:
-                new_dict[k] = "[MASKED]"
-            else:
-                new_dict[k] = _mask_and_serialize(v, sensitive_keys)
-        return new_dict
-
-    if isinstance(data, list):
-        return [_mask_and_serialize(item, sensitive_keys) for item in data]
-
-    if not isinstance(data, (str, int, float, bool, type(None))):
-        try:
-            return str(data)
-        except Exception:
-            return "[SERIALIZATION_ERROR]"
-
-    return data
-
-
 def _capture_span_attributes(
         attributes_to_capture: Optional[List[str]],
         kwargs: Dict[str, Any],
@@ -76,7 +52,8 @@ def _capture_span_attributes(
                     processed_value = "[MASKED]"
                 else:
                     raw_value = kwargs[attr_name]
-                    processed_value = _mask_and_serialize(raw_value, sensitive_keys)
+                    # Rust extension expects a List[str] for sensitive_keys, not set
+                    processed_value = vectorwave_core.mask_and_serialize(raw_value, list(sensitive_keys))
 
                 captured_attributes[attr_name] = processed_value
 
@@ -160,8 +137,8 @@ def _create_input_vector_data(
     the core arguments and vectorize them
     """
     # 1. Process/Mask positional and keyword arguments
-    processed_args = _mask_and_serialize(list(args), sensitive_keys)
-    processed_kwargs = _mask_and_serialize(kwargs, sensitive_keys)
+    processed_args = vectorwave_core.mask_and_serialize(list(args), list(sensitive_keys))
+    processed_kwargs = vectorwave_core.mask_and_serialize(kwargs, list(sensitive_keys))
 
 
     texts_for_vector = [f"Function Context: {func_name}"]
@@ -309,7 +286,7 @@ def trace_span(
                     result = await func(*args, **kwargs)
 
                     if capture_return_value:
-                        processed_result = _mask_and_serialize(result, tracer.settings.sensitive_keys)
+                        processed_result = vectorwave_core.mask_and_serialize(result, list(tracer.settings.sensitive_keys))
                         try:
                             return_value_log = json.dumps(processed_result)
                         except TypeError:
@@ -442,7 +419,7 @@ def trace_span(
                     result = func(*args, **kwargs)
 
                     if capture_return_value:
-                        processed_result = _mask_and_serialize(result, tracer.settings.sensitive_keys)
+                        processed_result = vectorwave_core.mask_and_serialize(result, list(tracer.settings.sensitive_keys))
                         try:
                             return_value_log = json.dumps(processed_result)
                         except TypeError:
@@ -498,7 +475,7 @@ def trace_span(
 
                         if is_drift:
                             drift_alert_props = span_properties.copy()
-                            drift_alert_props["status"] = "WARNING" # 상태 변경
+                            drift_alert_props["status"] = "WARNING"
                             drift_alert_props["error_code"] = "SEMANTIC_DRIFT"
                             drift_alert_props["error_message"] = (
                                 f"Anomaly detected in data distribution.\n"
