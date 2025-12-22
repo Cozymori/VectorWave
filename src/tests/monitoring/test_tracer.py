@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 import time
 
-from vectorwave.monitoring.tracer import trace_root, trace_span, _mask_and_serialize
+from vectorwave.monitoring.tracer import trace_root, trace_span
 
 from vectorwave.models.db_config import WeaviateSettings
 
