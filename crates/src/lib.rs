@@ -1,8 +1,9 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
 use std::thread;
 use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use pyo3::types::{PyDict, PyList, PyString, PyBool, PyFloat, PyInt};
+use std::collections::HashSet;
 
 struct LogItem {
     collection: Py<PyAny>,
@@ -141,8 +142,52 @@ impl RustBatchManager {
     }
 }
 
+
+//tracer mask_and_serialize
+
+fn process_recursive(py: Python, value: &PyAny, sensitive_set: &HashSet<String>) -> PyResult<PyObject> {
+    if let Ok(dict_obj) = value.downcast::<PyDict>() {
+        let new_dict = PyDict::new(py);
+        for (k, v) in dict_obj {
+            let k_str = k.to_string().to_lowercase();
+            if sensitive_set.contains(&k_str) {
+                new_dict.set_item(k, "[MASKED]")?;
+            } else {
+                new_dict.set_item(k, process_recursive(py, v, sensitive_set)?)?;
+            }
+        }
+        Ok(new_dict.into())
+    } else if let Ok(list_obj) = value.downcast::<PyList>() {
+        let new_list = PyList::empty(py);
+        for item in list_obj {
+            new_list.append(process_recursive(py, item, sensitive_set)?)?;
+        }
+        Ok(new_list.into())
+    } else {
+        if value.is_none()
+           || value.is_instance_of::<PyBool>()
+           || value.is_instance_of::<PyFloat>()
+           || value.is_instance_of::<PyInt>()
+           || value.is_instance_of::<PyString>() {
+            Ok(value.into())
+        } else {
+            match value.str() {
+                Ok(s) => Ok(s.into()),
+                Err(_) => Ok("[SERIALIZATION_ERROR]".into_py(py))
+            }
+        }
+    }
+}
+
+#[pyfunction]
+fn mask_and_serialize(py: Python, data: &PyAny, sensitive_keys: Vec<String>) -> PyResult<PyObject> {
+    let sensitive_set: HashSet<String> = sensitive_keys.into_iter().map(|s| s.to_lowercase()).collect();
+    process_recursive(py, data, &sensitive_set)
+}
+
 #[pymodule]
 fn vectorwave_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<RustBatchManager>()?;
+    m.add_function(wrap_pyfunction!(mask_and_serialize, m)?)?;
     Ok(())
 }
