@@ -1,21 +1,21 @@
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList, PyString, PyBool, PyFloat, PyInt};
+use std::collections::HashSet;
 use std::thread;
 use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
-use pyo3::types::{PyDict, PyList, PyString, PyBool, PyFloat, PyInt};
-use std::collections::HashSet;
 
 struct LogItem {
-    collection: Py<PyAny>,
+    collection: PyObject,
     properties: Py<PyDict>,
-    uuid: Option<Py<PyAny>>,
+    uuid: Option<PyObject>,
     vector: Option<Vec<f32>>,
 }
 
 #[pyclass]
 struct RustBatchManager {
     sender: Sender<LogItem>,
-    flush_callback: Py<PyAny>,
+    flush_callback: PyObject,
     worker_handle: Option<thread::JoinHandle<()>>,
     stop_signal: Sender<()>,
 }
@@ -24,14 +24,15 @@ struct RustBatchManager {
 impl RustBatchManager {
     #[new]
     fn new(
-        callback: Py<PyAny>,
+        py: Python<'_>,
+        callback: PyObject,
         batch_threshold: usize,
         flush_interval_ms: u64,
     ) -> Self {
         let (tx, rx) = bounded::<LogItem>(10000);
         let (stop_tx, stop_rx) = bounded(1);
 
-        let worker_callback = callback.clone();
+        let worker_callback = callback.clone_ref(py);
 
         let handle = thread::spawn(move || {
             Self::worker_loop(rx, stop_rx, worker_callback, batch_threshold, flush_interval_ms);
@@ -45,11 +46,12 @@ impl RustBatchManager {
         }
     }
 
+    #[pyo3(signature = (collection, properties, uuid=None, vector=None))]
     fn add_object(
         &self,
-        collection: Py<PyAny>,
+        collection: PyObject,
         properties: Py<PyDict>,
-        uuid: Option<Py<PyAny>>,
+        uuid: Option<PyObject>,
         vector: Option<Vec<f32>>,
     ) {
         let item = LogItem {
@@ -72,7 +74,6 @@ impl RustBatchManager {
 
     fn shutdown(&self) {
         let _ = self.stop_signal.send(());
-
     }
 }
 
@@ -80,7 +81,7 @@ impl RustBatchManager {
     fn worker_loop(
         rx: Receiver<LogItem>,
         stop_rx: Receiver<()>,
-        callback: Py<PyAny>,
+        callback: PyObject,
         threshold: usize,
         interval_ms: u64,
     ) {
@@ -110,12 +111,12 @@ impl RustBatchManager {
         }
     }
 
-    fn flush_buffer(buffer: &Vec<LogItem>, callback: &Py<PyAny>) {
+    fn flush_buffer(buffer: &Vec<LogItem>, callback: &PyObject) {
         Python::with_gil(|py| {
-            let py_list = PyList::empty(py);
+            let py_list = PyList::empty_bound(py);
 
             for item in buffer {
-                let dict = PyDict::new(py);
+                let dict = PyDict::new_bound(py);
                 let _ = dict.set_item("collection", &item.collection);
                 let _ = dict.set_item("properties", &item.properties);
 
@@ -143,24 +144,22 @@ impl RustBatchManager {
 }
 
 
-//tracer mask_and_serialize
-
-fn process_recursive(py: Python, value: &PyAny, sensitive_set: &HashSet<String>) -> PyResult<PyObject> {
+fn process_recursive(py: Python, value: &Bound<'_, PyAny>, sensitive_set: &HashSet<String>) -> PyResult<PyObject> {
     if let Ok(dict_obj) = value.downcast::<PyDict>() {
-        let new_dict = PyDict::new(py);
+        let new_dict = PyDict::new_bound(py);
         for (k, v) in dict_obj {
             let k_str = k.to_string().to_lowercase();
             if sensitive_set.contains(&k_str) {
                 new_dict.set_item(k, "[MASKED]")?;
             } else {
-                new_dict.set_item(k, process_recursive(py, v, sensitive_set)?)?;
+                new_dict.set_item(k, process_recursive(py, &v, sensitive_set)?)?;
             }
         }
         Ok(new_dict.into())
     } else if let Ok(list_obj) = value.downcast::<PyList>() {
-        let new_list = PyList::empty(py);
+        let new_list = PyList::empty_bound(py);
         for item in list_obj {
-            new_list.append(process_recursive(py, item, sensitive_set)?)?;
+            new_list.append(process_recursive(py, &item, sensitive_set)?)?;
         }
         Ok(new_list.into())
     } else {
@@ -169,24 +168,25 @@ fn process_recursive(py: Python, value: &PyAny, sensitive_set: &HashSet<String>)
            || value.is_instance_of::<PyFloat>()
            || value.is_instance_of::<PyInt>()
            || value.is_instance_of::<PyString>() {
-            Ok(value.into())
+            // [수정] unbind()를 사용하여 PyObject로 변환
+            Ok(value.clone().unbind())
         } else {
             match value.str() {
                 Ok(s) => Ok(s.into()),
-                Err(_) => Ok("[SERIALIZATION_ERROR]".into_py(py))
+                Err(_) => Ok(PyString::new_bound(py, "[SERIALIZATION_ERROR]").into())
             }
         }
     }
 }
 
 #[pyfunction]
-fn mask_and_serialize(py: Python, data: &PyAny, sensitive_keys: Vec<String>) -> PyResult<PyObject> {
+fn mask_and_serialize(py: Python, data: &Bound<'_, PyAny>, sensitive_keys: Vec<String>) -> PyResult<PyObject> {
     let sensitive_set: HashSet<String> = sensitive_keys.into_iter().map(|s| s.to_lowercase()).collect();
     process_recursive(py, data, &sensitive_set)
 }
 
 #[pymodule]
-fn vectorwave_core(_py: Python, m: &PyModule) -> PyResult<()> {
+fn vectorwave_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustBatchManager>()?;
     m.add_function(wrap_pyfunction!(mask_and_serialize, m)?)?;
     Ok(())
