@@ -1,9 +1,16 @@
 Need more information? Visit [here](https://cozymori.github.io/vectorwave-docs/)
-<hr>
 
 # VectorWave
-
-**Seamless Auto-Vectorization Framework**
+![Star](https://badgen.net/github/stars/cozymori/vectorwave)
+![Release](https://badgen.net/github/release/cozymori/vectorwave)
+![Tag](https://badgen.net/github/tag/cozymori/vectorwave)
+![Commit](https://badgen.net/github/last-commit/cozymori/vectorwave)
+![Contributors](https://badgen.net/github/contributors/cozymori/vectorwave)
+![OpenPrs](https://badgen.net/github/open-prs/cozymori/vectorwave)
+![MergedPrs](https://badgen.net/github/merged-prs/cozymori/vectorwave)
+![Checks](https://badgen.net/github/checks/cozymori/vectorwave)
+![Pypi](https://badgen.net/pypi/v/vectorwave)
+<br>**Seamless Auto-Vectorization Framework**
 
 We transform volatile data that disappears the moment code is executed into a Searchable and Reusable permanent knowledge asset.
 
