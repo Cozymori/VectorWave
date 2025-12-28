@@ -1,6 +1,8 @@
 import pytest
 import os
 import logging
+from vectorwave.batch.batch import get_batch_manager
+import time
 
 CACHE_FILE_PATH = ".vectorwave_functions_cache.json"
 logger = logging.getLogger(__name__)
@@ -25,3 +27,15 @@ def atomic_function_cache():
 
     # --- TEARDOWN (After Test) ---
     _delete_cache()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def shutdown_batch_manager():
+    yield
+    try:
+        manager = get_batch_manager()
+        if hasattr(manager, "shutdown"):
+            manager.shutdown()
+            time.sleep(0.1)
+    except Exception as e:
+        print(f"Cleanup error: {e}")
