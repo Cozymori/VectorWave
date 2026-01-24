@@ -332,7 +332,7 @@ def trace_span(
                             result=return_value_log
                         )
 
-                    if tracer.settings.DRIFT_DETECTION_ENABLED and vector_to_add:
+                    if tracer.settings.DRIFT_DETECTION_ENABLED and vector_to_add and status == "SUCCESS":
                         is_drift, dist, nearest_id = check_semantic_drift(
                             vector=vector_to_add,
                             function_name=func.__name__,
@@ -465,7 +465,7 @@ def trace_span(
                             result=return_value_log
                         )
 
-                    if tracer.settings.DRIFT_DETECTION_ENABLED and vector_to_add:
+                    if tracer.settings.DRIFT_DETECTION_ENABLED and vector_to_add and status == "SUCCESS":
                         is_drift, dist, nearest_id = check_semantic_drift(
                             vector=vector_to_add,
                             function_name=func.__name__,
