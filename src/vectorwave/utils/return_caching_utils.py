@@ -6,14 +6,15 @@ from uuid import uuid4
 
 from weaviate.util import generate_uuid5
 import weaviate.classes.query as wvc_query
+from weaviate.classes.query import Filter
 
 from ..models.db_config import get_weaviate_settings, WeaviateSettings
 from ..monitoring.tracer import _create_input_vector_data, _deserialize_return_value, current_tracer_var, \
     current_span_id_var
-from ..database.db_search import search_similar_execution
+from ..database.db_search import search_similar_execution, _build_weaviate_filters
 from ..vectorizer.factory import get_vectorizer
 from ..batch.batch import get_batch_manager
-from ..database.db import get_cached_client  # [NEW] 클라이언트 직접 접근
+from ..database.db import get_cached_client
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,8 @@ def _check_and_return_cached_result(
         kwargs: Dict[str, Any],
         function_name: str,
         cache_threshold: float,
-        is_async: bool
+        is_async: bool,
+        filters: Optional[Dict[str, Any]] = None  # [NEW] 인자 추가
 ) -> Optional[Any]:
     """
     Checks for a cached result.
@@ -53,17 +55,24 @@ def _check_and_return_cached_result(
         # (B) Vectorize
         input_vector = vectorizer.embed(input_vector_data['text'])
 
-        # (C) [NEW] Priority 1: Search Golden Dataset
+        # (C) Priority 1: Search Golden Dataset
         client = get_cached_client()
         golden_match = None
 
         try:
             golden_col = client.collections.get(settings.GOLDEN_COLLECTION_NAME)
-            # Golden Data search(vector similarity based)
+
+            base_filter_obj = wvc_query.Filter.by_property("function_name").equal(function_name)
+            extra_filter_obj = _build_weaviate_filters(filters)
+
+            final_filters = base_filter_obj
+            if extra_filter_obj:
+                final_filters = Filter.all_of([base_filter_obj, extra_filter_obj])
+
             response = golden_col.query.near_vector(
                 near_vector=input_vector,
                 limit=1,
-                filters=wvc_query.Filter.by_property("function_name").equal(function_name),
+                filters=final_filters,
                 certainty=cache_threshold,
                 return_properties=["return_value", "original_uuid"],
                 return_metadata=wvc_query.MetadataQuery(distance=True, certainty=True)
@@ -91,10 +100,12 @@ def _check_and_return_cached_result(
             }
             is_golden_hit = True
         else:
+            # [NEW] filters 전달
             cached_log = search_similar_execution(
                 query_vector=input_vector,
                 function_name=function_name,
-                threshold=cache_threshold
+                threshold=cache_threshold,
+                filters=filters
             )
 
         # (E) Process Cache Hit
