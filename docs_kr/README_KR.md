@@ -184,6 +184,44 @@ result_2 = summarize_document("The Q1 results demonstrated strong growth in Euro
 # result_2는 실제 함수 실행 없이 result_1의 저장된 값을 반환합니다.
 ```
 
+이번 업데이트에서는 **멀티 테넌시(Multi-tenancy) 지원**과 **성능 최적화**에 중점을 두었습니다.
+
+### 1. 시맨틱 캐싱 스코프(Scope) 및 격리 기능
+이제 프로젝트나 사용자 단위로 캐시를 격리하여 데이터 프라이버시를 보장할 수 있습니다.
+- **기능**: `@vectorize` 데코레이터에 `semantic_cache_scope` 파라미터가 추가되었습니다.
+- **동작**: 지정된 필드(예: `project_id`, `user_id`)가 일치하는 경우에만 캐시를 반환합니다.
+- **자동 캡처**: 스코프로 지정된 인자는 별도로 `capture_inputs`에 명시하지 않아도 자동으로 DB에 저장됩니다.
+
+**예시:**
+```python
+@vectorize(
+    semantic_cache=True,
+    semantic_cache_scope=['project_id'],  # project_id가 같을 때만 캐시 사용
+    tokenization="field" # .weaviate_properties 설정 권장
+)
+def summarize(project_id, content):
+    ...
+2. ID 필드 검색 정확도 향상 (tokenization: field)
+기존의 word 단위 토큰화로 인해 ID 값(예: user_A)이 부분 일치로 잘못 검색되는 문제를 해결했습니다.
+
+설정: .weaviate_properties 파일에서 tokenization: "field" 옵션을 사용하여 문자열 전체를 정확하게 매칭(Exact Match)하도록 설정할 수 있습니다.
+
+호환성: Weaviate v4 클라이언트와의 호환성을 위해 내부 매핑 로직을 개선했습니다.
+
+3. 추적기(Tracer) 성능 최적화
+함수 호출 시 발생하는 오버헤드를 최소화했습니다.
+
+최적화: inspect.signature 호출에 LRU Cache를 적용하여, 반복되는 함수 호출 시 서명 분석 비용을 제거했습니다.
+
+안정성: 데코레이터가 주입하는 메타데이터(kwargs)와 실제 함수 인자 간의 충돌로 인해 로그 저장이 실패하던 버그를 수정했습니다.
+
+4. 운영 환경을 위한 무중단 스키마 마이그레이션
+서비스 운영 중에도 데이터를 유지하며 새로운 필터링 속성을 추가할 수 있습니다.
+
+유틸리티: vectorwave.database.db.update_database_schema() 함수가 추가되었습니다.
+
+사용법: .weaviate_properties에 새로운 속성을 정의한 후, 이 함수를 실행하면 DB에 즉시 반영됩니다.
+
 ### 3\. [검색 ①] 함수 정의 검색 (RAG 용도)
 
 ```python
