@@ -3,7 +3,7 @@ import inspect
 import time
 import traceback
 import json
-from functools import wraps
+from functools import wraps, lru_cache
 from contextvars import ContextVar
 from typing import Optional, List, Dict, Any, Callable
 from uuid import uuid4
@@ -18,7 +18,6 @@ from ..vectorizer.factory import get_vectorizer
 from ..database.db_search import check_semantic_drift
 from ..utils.context import execution_source_context
 
-# Create module-level logger
 logger = logging.getLogger(__name__)
 
 
@@ -35,30 +34,60 @@ current_tracer_var: ContextVar[Optional[TraceCollector]] = ContextVar('current_t
 current_span_id_var: ContextVar[Optional[str]] = ContextVar('current_span_id', default=None)
 
 
+@lru_cache(maxsize=2048)
+def _get_cached_signature(func: Callable) -> inspect.Signature:
+    return inspect.signature(func)
+
+
 def _capture_span_attributes(
         attributes_to_capture: Optional[List[str]],
+        args: tuple,
         kwargs: Dict[str, Any],
-        func_name: str,
+        func: Callable,
         sensitive_keys: set
 ) -> Dict[str, Any]:
+    """
+    Captures attribute values using cached function signature for performance.
+    """
     captured_attributes = {}
     if not attributes_to_capture:
         return captured_attributes
 
     try:
+        # 1. Use Cached Signature (Fast)
+        sig = _get_cached_signature(func)
+        valid_param_names = set(sig.parameters.keys())
+
+        # Filter kwargs
+        sig_kwargs = {k: v for k, v in kwargs.items() if k in valid_param_names}
+
+        # Bind arguments
+        bound = sig.bind(*args, **sig_kwargs)
+        bound.apply_defaults()
+
+        all_values = bound.arguments.copy()
+
+        # 2. Merge extra tags (e.g., 'team', 'run_id')
+        for key, value in kwargs.items():
+            if key not in all_values and key in attributes_to_capture:
+                all_values[key] = value
+
+        # 3. Process & Mask
         for attr_name in attributes_to_capture:
-            if attr_name in kwargs:
+            if attr_name in all_values:
+                raw_value = all_values[attr_name]
+
                 if attr_name.lower() in sensitive_keys:
                     processed_value = "[MASKED]"
                 else:
-                    raw_value = kwargs[attr_name]
-                    # Rust extension expects a List[str] for sensitive_keys, not set
                     processed_value = vectorwave_core.mask_and_serialize(raw_value, list(sensitive_keys))
 
                 captured_attributes[attr_name] = processed_value
 
     except Exception as e:
-        logger.warning("Failed to capture attributes for '%s': %s", func_name, e)
+        # Fallback logic is removed for performance; if binding fails, we warn.
+        # But since we filter kwargs, binding failure is unlikely unless args count mismatch.
+        logger.warning("Failed to capture attributes for '%s': %s", func.__name__, e)
 
     return captured_attributes
 
@@ -132,14 +161,8 @@ def _create_input_vector_data(
         kwargs: Dict[str, Any],
         sensitive_keys: set
 ) -> Dict[str, Any]:
-    """
-    To enhance the quality of SC and DD, we extract only
-    the core arguments and vectorize them
-    """
-    # 1. Process/Mask positional and keyword arguments
     processed_args = vectorwave_core.mask_and_serialize(list(args), list(sensitive_keys))
     processed_kwargs = vectorwave_core.mask_and_serialize(kwargs, list(sensitive_keys))
-
 
     texts_for_vector = [f"Function Context: {func_name}"]
 
@@ -166,31 +189,16 @@ def _create_input_vector_data(
 
 
 def _deserialize_return_value(return_value_str: Optional[str]) -> Any:
-    """
-    Attempts to deserialize a return value string (stored in DB)
-    back to a Python object.
-    [FIX] Now attempts json.loads for ALL strings to correctly unquote simple strings.
-    """
     if return_value_str is None:
         return None
-
     try:
-        # Try to deserialize everything (dicts, lists, and quoted strings like '"result"')
         return json.loads(return_value_str)
     except (json.JSONDecodeError, TypeError):
-        # Fallback: If it's a raw string that wasn't JSON encoded or failed
-        # e.g., "Plain String" without quotes
         return return_value_str
 
 
 def trace_root() -> Callable:
-    """
-    Decorator factory for the workflow's entry point function.
-    Creates and sets the TraceCollector in ContextVar.
-    """
-
     def decorator(func: Callable) -> Callable:
-
         if inspect.iscoroutinefunction(func):
             @wraps(func)
             async def async_wrapper(*args, **kwargs):
@@ -200,16 +208,14 @@ def trace_root() -> Callable:
                 trace_id = kwargs.pop('trace_id', str(uuid4()))
                 tracer = TraceCollector(trace_id=trace_id)
                 token = current_tracer_var.set(tracer)
-                token_span = current_span_id_var.set(None)
+                current_span_id_var.set(None)
 
                 try:
                     return await func(*args, **kwargs)
                 finally:
                     current_tracer_var.reset(token)
-
             return async_wrapper
-
-        else:  # original sync logic
+        else:
             @wraps(func)
             def sync_wrapper(*args, **kwargs):
                 if current_tracer_var.get() is not None:
@@ -218,15 +224,13 @@ def trace_root() -> Callable:
                 trace_id = kwargs.pop('trace_id', str(uuid4()))
                 tracer = TraceCollector(trace_id=trace_id)
                 token = current_tracer_var.set(tracer)
-                token_span = current_span_id_var.set(None)
+                current_span_id_var.set(None)
 
                 try:
                     return func(*args, **kwargs)
                 finally:
                     current_tracer_var.reset(token)
-
             return sync_wrapper
-
     return decorator
 
 
@@ -236,13 +240,7 @@ def trace_span(
         attributes_to_capture: Optional[List[str]] = None,
         capture_return_value: bool = False
 ) -> Callable:
-    """
-    Decorator to capture function execution as a 'span'.
-    Can be used as @trace_span or @trace_span(attributes_to_capture=[...]).
-    """
-
     def decorator(func: Callable) -> Callable:
-
         if inspect.iscoroutinefunction(func):
             @wraps(func)
             async def async_wrapper(*args, **kwargs):
@@ -264,7 +262,7 @@ def trace_span(
                 return_value_log: Optional[str] = None
 
                 captured_attributes = _capture_span_attributes(
-                    attributes_to_capture, kwargs, func.__name__, tracer.settings.sensitive_keys
+                    attributes_to_capture, args, kwargs, func, tracer.settings.sensitive_keys
                 )
 
                 if capture_return_value:
@@ -277,14 +275,12 @@ def trace_span(
                             sensitive_keys=tracer.settings.sensitive_keys
                         )
                         try:
-                            # If successful, this vector will be saved to the DB
                             vector_to_add = vectorizer.embed(input_vector_data['text'])
                         except Exception as ve:
                             logger.warning(f"Failed to vectorize input for '{func.__name__}' (Async): {ve}")
 
                 try:
                     result = await func(*args, **kwargs)
-
                     if capture_return_value:
                         processed_result = vectorwave_core.mask_and_serialize(result, list(tracer.settings.sensitive_keys))
                         try:
@@ -296,60 +292,47 @@ def trace_span(
                     status = "ERROR"
                     error_msg = traceback.format_exc()
                     error_code = _determine_error_code(tracer, e)
-
                     span_properties = _create_span_properties(
                         tracer, func, start_time, status, error_msg, error_code, captured_attributes,
-                        my_span_id=my_span_id,
-                        parent_span_id=parent_span_id,
-                        capture_return_value=capture_return_value,
-                        result=None,
+                        my_span_id=my_span_id, parent_span_id=parent_span_id,
+                        capture_return_value=capture_return_value, result=None,
                     )
-
                     try:
                         vectorizer = get_vectorizer()
                         if vectorizer:
-                            simple_error_msg = str(e)
-                            vector_to_add = vectorizer.embed(simple_error_msg)
+                            vector_to_add = vectorizer.embed(str(e))
                     except Exception as ve:
-                        logger.warning(f"Failed to vectorize error message for '{func.__name__}': {ve}")
+                        logger.warning(f"Failed to vectorize error message: {ve}")
 
                     try:
                         if not tracer.alert_sent:
                             tracer.alerter.notify(span_properties)
                             tracer.alert_sent = True
                     except Exception as alert_e:
-                        logger.warning(f"Alerter failed to notify: {alert_e}")
-
+                        logger.warning(f"Alerter failed: {alert_e}")
                     raise e
 
                 finally:
                     if status == "SUCCESS":
                         span_properties = _create_span_properties(
                             tracer, func, start_time, status, error_msg, error_code, captured_attributes,
-                            my_span_id=my_span_id,
-                            parent_span_id=parent_span_id,
-                            capture_return_value=capture_return_value,
-                            result=return_value_log
+                            my_span_id=my_span_id, parent_span_id=parent_span_id,
+                            capture_return_value=capture_return_value, result=return_value_log
                         )
 
                     if tracer.settings.DRIFT_DETECTION_ENABLED and vector_to_add and status == "SUCCESS":
                         is_drift, dist, nearest_id = check_semantic_drift(
-                            vector=vector_to_add,
-                            function_name=func.__name__,
+                            vector=vector_to_add, function_name=func.__name__,
                             threshold=tracer.settings.DRIFT_DISTANCE_THRESHOLD,
                             k=tracer.settings.DRIFT_NEIGHBOR_AMOUNT
                         )
-
                         if is_drift:
                             drift_alert_props = span_properties.copy()
-                            drift_alert_props["status"] = "WARNING" # 상태 변경
+                            drift_alert_props["status"] = "WARNING"
                             drift_alert_props["error_code"] = "SEMANTIC_DRIFT"
                             drift_alert_props["error_message"] = (
-                                f"Anomaly detected in data distribution.\n"
-                                f"Distance to nearest neighbor: {dist:.4f} (Threshold: {tracer.settings.DRIFT_DISTANCE_THRESHOLD})\n"
-                                f"Nearest Log UUID: {nearest_id}"
+                                f"Anomaly detected.\nDistance: {dist:.4f} (Threshold: {tracer.settings.DRIFT_DISTANCE_THRESHOLD})\nNearest: {nearest_id}"
                             )
-
                             try:
                                 tracer.alerter.notify(drift_alert_props)
                             except Exception as e:
@@ -367,16 +350,13 @@ def trace_span(
                                 vector=vector_to_add
                             )
                         except Exception as e:
-                            logger.error("Failed to log span for '%s' (trace_id: %s): %s", func.__name__,
-                                         tracer.trace_id, e)
+                            logger.error("Failed to log span: %s", e)
 
                     current_span_id_var.reset(token)
-
                 return result
-
             return async_wrapper
 
-        else:  # (Sync Function)
+        else:  # Sync
             @wraps(func)
             def sync_wrapper(*args, **kwargs):
                 tracer = current_tracer_var.get()
@@ -397,27 +377,22 @@ def trace_span(
                 return_value_log: Optional[str] = None
 
                 captured_attributes = _capture_span_attributes(
-                    attributes_to_capture, kwargs, func.__name__, tracer.settings.sensitive_keys
+                    attributes_to_capture, args, kwargs, func, tracer.settings.sensitive_keys
                 )
 
                 if capture_return_value:
                     vectorizer = get_vectorizer()
                     if vectorizer:
                         input_vector_data = _create_input_vector_data(
-                            func_name=func.__name__,
-                            args=args,
-                            kwargs=kwargs,
-                            sensitive_keys=tracer.settings.sensitive_keys
+                            func_name=func.__name__, args=args, kwargs=kwargs, sensitive_keys=tracer.settings.sensitive_keys
                         )
                         try:
-                            # If successful, this vector will be saved to the DB
                             vector_to_add = vectorizer.embed(input_vector_data['text'])
                         except Exception as ve:
-                            logger.warning(f"Failed to vectorize input for '{func.__name__}': {ve}")
+                            logger.warning(f"Failed to vectorize input: {ve}")
 
                 try:
                     result = func(*args, **kwargs)
-
                     if capture_return_value:
                         processed_result = vectorwave_core.mask_and_serialize(result, list(tracer.settings.sensitive_keys))
                         try:
@@ -429,68 +404,29 @@ def trace_span(
                     status = "ERROR"
                     error_msg = traceback.format_exc()
                     error_code = _determine_error_code(tracer, e)
-
                     span_properties = _create_span_properties(
                         tracer, func, start_time, status, error_msg, error_code, captured_attributes,
-                        my_span_id=my_span_id,
-                        parent_span_id=parent_span_id,
-                        capture_return_value=capture_return_value,
-                        result=None
+                        my_span_id=my_span_id, parent_span_id=parent_span_id,
+                        capture_return_value=capture_return_value, result=None
                     )
-
                     try:
-                        vectorizer = get_vectorizer()
                         if vectorizer:
-                            simple_error_msg = str(e)
-                            vector_to_add = vectorizer.embed(simple_error_msg)
-                    except Exception as ve:
-                        logger.warning(f"Failed to vectorize error message for '{func.__name__}': {ve}")
-
+                            vector_to_add = vectorizer.embed(str(e))
+                    except: pass
                     try:
                         if not tracer.alert_sent:
                             tracer.alerter.notify(span_properties)
                             tracer.alert_sent = True
-                    except Exception as alert_e:
-                        logger.warning(f"Alerter failed to notify: {alert_e}")
-
+                    except: pass
                     raise e
 
                 finally:
                     if status == "SUCCESS":
                         span_properties = _create_span_properties(
                             tracer, func, start_time, status, error_msg, error_code, captured_attributes,
-                            my_span_id=my_span_id,
-                            parent_span_id=parent_span_id,
-                            capture_return_value=capture_return_value,
-                            result=return_value_log
+                            my_span_id=my_span_id, parent_span_id=parent_span_id,
+                            capture_return_value=capture_return_value, result=return_value_log
                         )
-
-                    if tracer.settings.DRIFT_DETECTION_ENABLED and vector_to_add and status == "SUCCESS":
-                        is_drift, dist, nearest_id = check_semantic_drift(
-                            vector=vector_to_add,
-                            function_name=func.__name__,
-                            threshold=tracer.settings.DRIFT_DISTANCE_THRESHOLD,
-                            k=tracer.settings.DRIFT_NEIGHBOR_AMOUNT
-                        )
-
-                        if is_drift:
-                            drift_alert_props = span_properties.copy()
-                            drift_alert_props["status"] = "WARNING"
-                            drift_alert_props["error_code"] = "SEMANTIC_DRIFT"
-                            drift_alert_props["error_message"] = (
-                                f"Anomaly detected in data distribution.\n"
-                                f"Distance to nearest neighbor: {dist:.4f} (Threshold: {tracer.settings.DRIFT_DISTANCE_THRESHOLD})\n"
-                                f"Nearest Log UUID: {nearest_id}"
-                            )
-
-                            try:
-                                tracer.alerter.notify(drift_alert_props)
-                            except Exception as e:
-                                logger.warning(f"Failed to send drift alert: {e}")
-
-                            span_properties["status"] = "ANOMALY"
-                            span_properties["error_code"] = "SEMANTIC_DRIFT"
-                            span_properties["error_message"] = drift_alert_props["error_message"]
 
                     if span_properties:
                         try:
@@ -500,13 +436,10 @@ def trace_span(
                                 vector=vector_to_add
                             )
                         except Exception as e:
-                            logger.error("Failed to log span for '%s' (trace_id: %s): %s", func.__name__,
-                                         tracer.trace_id, e)
+                            logger.error("Failed to log span: %s", e)
 
                     current_span_id_var.reset(token)
-
                 return result
-
             return sync_wrapper
 
     if _func is None:
