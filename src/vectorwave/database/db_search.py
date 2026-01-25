@@ -69,6 +69,7 @@ def search_errors_by_message(
         limit: int = 5,
         filters: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
+    # ... (No changes needed here)
     """
     [NEW] Searches the 'VectorWaveExecutions' collection for
     semantically similar error logs using a natural language query.
@@ -128,6 +129,7 @@ def search_errors_by_message(
 
 
 def search_functions(query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    # ... (No changes needed here)
     """
     Searches function definitions from the [VectorWaveFunctions] collection using natural language (nearText).
     """
@@ -185,6 +187,7 @@ def search_executions(
         sort_by: Optional[str] = "timestamp_utc",
         sort_ascending: bool = False
 ) -> List[Dict[str, Any]]:
+    # ... (No changes needed here)
     """
     Searches execution logs from the [VectorWaveExecutions] collection using filtering and sorting.
     """
@@ -226,21 +229,11 @@ def search_similar_execution(
         query_vector: List[float],
         function_name: str,
         threshold: float = 0.9,
-        limit: int = 1
+        limit: int = 1,
+        filters: Optional[Dict[str, Any]] = None  # [NEW] 인자 추가
 ) -> Optional[Dict[str, Any]]:
     """
-    Searches the 'VectorWaveExecutions' collection for a successful log
-    with a semantically similar input vector, used for Semantic Caching.
-
-    Args:
-        query_vector: The vector of the serialized function input.
-        function_name: The name of the function to filter by.
-        threshold: The similarity threshold (0.0 to 1.0). Only returns results
-                   where certainty >= threshold.
-        limit: The maximum number of results to return (default 1 for caching).
-
-    Returns:
-        The properties of the best matching execution log if found, otherwise None.
+    Searches the 'VectorWaveExecutions' collection with optional filters.
     """
     try:
         settings: WeaviateSettings = get_weaviate_settings()
@@ -248,14 +241,17 @@ def search_similar_execution(
 
         collection = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
 
-        # 1. Build Base Filters: Must be a successful execution of the target function
         base_filters = {
             "status": "SUCCESS",
             "function_name": function_name
         }
+
+        # [NEW] 사용자 필터 병합
+        if filters:
+            base_filters.update(filters)
+
         weaviate_filter = _build_weaviate_filters(base_filters)
 
-        # Weaviate's near_vector uses `certainty` for similarity thresholding.
         certainty_threshold = threshold
 
         logger.info(
@@ -266,15 +262,12 @@ def search_similar_execution(
             limit=limit,
             filters=weaviate_filter,
             certainty=certainty_threshold,
-            # We only need the return value and metadata
             return_metadata=wvc.query.MetadataQuery(distance=True, certainty=True),
             return_properties=["return_value", "timestamp_utc"]
         )
 
         if response.objects:
-            # Found a match. Extract the properties and metadata.
             best_match = response.objects[0]
-
             result = {
                 'return_value': best_match.properties.get('return_value'),
                 'metadata': {
@@ -283,14 +276,12 @@ def search_similar_execution(
                 },
                 'uuid': str(best_match.uuid)
             }
-
             return result
 
         return None
 
     except Exception as e:
         logger.error(f"Error during Weaviate cache search for '{function_name}': {e}", exc_info=True)
-        # Fail gracefully: a cache search failure should not prevent execution.
         return None
 
 
@@ -300,14 +291,9 @@ def search_functions_hybrid(
         filters: Optional[Dict[str, Any]] = None,
         alpha: float = 0.5
 ) -> List[Dict[str, Any]]:
+    # ... (No changes needed here)
     """
     Performs Hybrid Search (Keyword + Vector) on function definitions.
-
-    Args:
-        query: The search query string.
-        limit: Max number of results.
-        filters: Dictionary of filters.
-        alpha: Weight for hybrid search (0.0 = Keyword only, 1.0 = Vector only, 0.5 = Balanced).
     """
     try:
         settings: WeaviateSettings = get_weaviate_settings()
@@ -370,6 +356,7 @@ def check_semantic_drift(
         threshold: float,
         k: int = 5
 ) -> Tuple[bool, float, Optional[str]]:
+    # ... (No changes needed here)
     """
     KNN based semantic drift check.
     """
@@ -419,6 +406,7 @@ def simulate_drift_check(
         threshold: Optional[float] = None,
         k: Optional[int] = None
 ) -> Dict[str, Any]:
+    # ... (No changes needed here)
     """
     Simulates drift detection for a hypothetical input string without executing the function.
     Useful for 'Drift Radar' or debugging.
@@ -466,6 +454,7 @@ def simulate_drift_check(
 
 
 def get_token_usage_stats() -> Dict[str, int]:
+    # ... (No changes needed here)
     """VectorWaveTokenUsage collections based analysis"""
     try:
         client = get_cached_client()
