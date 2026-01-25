@@ -26,6 +26,9 @@ def vectorize(search_description: Optional[str] = None,
               cache_threshold: float = 0.9,
               replay: bool = False,
               attributes_to_capture: Optional[List[str]] = None,
+              capture_inputs: bool = False,
+              semantic_cache_filters: Optional[Dict[str, Any]] = None,
+              semantic_cache_scope: Optional[List[str]] = None,
               **execution_tags):
     """
     VectorWave Decorator with Auto-Generation support.
@@ -59,6 +62,15 @@ def vectorize(search_description: Optional[str] = None,
             for attr in attributes_to_capture:
                 if attr not in final_attributes:
                     final_attributes.append(attr)
+
+        if capture_inputs:
+            try:
+                sig = inspect.signature(func)
+                for param_name in sig.parameters:
+                    if param_name not in ('self', 'cls') and param_name not in final_attributes:
+                        final_attributes.append(param_name)
+            except Exception as e:
+                logger.warning(f"Failed to inspect signature for auto-capture in '{function_name}': {e}")
 
         if replay:
             try:
@@ -109,7 +121,6 @@ def vectorize(search_description: Optional[str] = None,
                     "static_properties": static_properties
                 })
             else:
-                # [Existing] Immediate Registration Mode
                 current_content_hash = function_cache_manager.calculate_content_hash(func_identifier, static_properties)
 
                 if function_cache_manager.is_cached_and_unchanged(func_uuid, current_content_hash):
@@ -137,6 +148,25 @@ def vectorize(search_description: Optional[str] = None,
         except Exception as e:
             logger.error("Error in @vectorize setup for '%s': %s", func.__name__, e)
 
+        def resolve_semantic_filters(args, kwargs):
+            runtime_filters = semantic_cache_filters.copy() if semantic_cache_filters else {}
+
+            if semantic_cache_scope:
+                try:
+                    sig = inspect.signature(func)
+                    bound_args = sig.bind(*args, **kwargs)
+                    bound_args.apply_defaults()
+
+                    for arg_name in semantic_cache_scope:
+                        if arg_name in bound_args.arguments:
+                            runtime_filters[arg_name] = bound_args.arguments[arg_name]
+                        else:
+                            logger.warning(f"Semantic Scope: Argument '{arg_name}' not found in call to '{function_name}'.")
+                except Exception as e:
+                    logger.error(f"Failed to resolve semantic_cache_scope for '{function_name}': {e}")
+
+            return runtime_filters
+
         # --- Wrapper Logic ---
 
         if is_async_func:
@@ -144,7 +174,6 @@ def vectorize(search_description: Optional[str] = None,
             @trace_span(attributes_to_capture=final_attributes, capture_return_value=capture_return_value)
             @wraps(func)
             async def inner_wrapper(*args, **kwargs):
-                # Remove injected tags from kwargs before calling original func
                 clean_kwargs = {k: v for k, v in kwargs.items() if
                                 k not in valid_execution_tags and k != 'function_uuid' and k != 'exec_source'}
                 return await func(*args, **clean_kwargs)
@@ -152,7 +181,8 @@ def vectorize(search_description: Optional[str] = None,
             @wraps(func)
             async def outer_wrapper(*args, **kwargs):
                 if semantic_cache:
-                    cached = _check_and_return_cached_result(func, args, kwargs, function_name, cache_threshold, True)
+                    filters = resolve_semantic_filters(args, kwargs)
+                    cached = _check_and_return_cached_result(func, args, kwargs, function_name, cache_threshold, True, filters=filters)
                     if cached is not None: return cached
 
                 full_kwargs = kwargs.copy()
@@ -176,7 +206,8 @@ def vectorize(search_description: Optional[str] = None,
             @wraps(func)
             def outer_wrapper(*args, **kwargs):
                 if semantic_cache:
-                    cached = _check_and_return_cached_result(func, args, kwargs, function_name, cache_threshold, False)
+                    filters = resolve_semantic_filters(args, kwargs)
+                    cached = _check_and_return_cached_result(func, args, kwargs, function_name, cache_threshold, False, filters=filters)
                     if cached is not None: return cached
 
                 full_kwargs = kwargs.copy()
