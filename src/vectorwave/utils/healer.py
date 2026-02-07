@@ -142,8 +142,9 @@ You are an expert Python debugger. Your goal is to fix a buggy function based on
 ## 5. Instructions
 1. **Analyze**: Infer the intended functionality of `{func_name}` based on its name and current logic.
 2. **Diagnose**: Identify the root cause of the "Recent Errors".
-3. **Fix**: Rewrite the function to resolve the error.
-    - Fix the logic that causes the crash (e.g., type mismatch, index error).
+3. **Fix**: Rewrite the function so that it returns correct results for ALL inputs, including those that previously caused errors.
+    - Fix the root logic itself. DO NOT simply add defensive `raise` statements or wrap code in `try/except` as a workaround.
+    - Use the "Successful Executions" above to infer the expected input→output pattern, then ensure error-causing inputs also produce valid results following that same pattern.
     - If the code contains clearly incorrect logic (like intentional bug injections for testing), correct it to match the intended behavior.
     - Refactor the code to be clean and idiomatic Python.
 4. **Constraint**:
