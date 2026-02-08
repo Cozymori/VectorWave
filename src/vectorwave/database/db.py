@@ -100,6 +100,7 @@ def create_vectorwave_schema(client: weaviate.WeaviateClient, settings: Weaviate
         wvc.Property(name="source_code", data_type=wvc.DataType.TEXT),
         wvc.Property(name="search_description", data_type=wvc.DataType.TEXT),
         wvc.Property(name="sequence_narrative", data_type=wvc.DataType.TEXT),
+        wvc.Property(name="file_path",data_type=wvc.DataType.TEXT),
     ]
 
     custom_properties = []
