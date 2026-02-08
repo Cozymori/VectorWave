@@ -1,5 +1,6 @@
 import inspect
 import logging
+import os
 from functools import wraps
 from typing import List, Optional, Dict, Any
 
@@ -12,6 +13,7 @@ from ..utils.function_cache import function_cache_manager
 from ..utils.return_caching_utils import _check_and_return_cached_result
 from ..vectorizer.factory import get_vectorizer
 from ..utils.context import execution_source_context
+from ..utils.path_utils import get_repo_root_and_relative_path # New import
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +104,22 @@ def vectorize(search_description: Optional[str] = None,
             docstring = inspect.getdoc(func) or ""
             source_code = inspect.getsource(func)
 
+            try:
+                abs_file_path = os.path.abspath(inspect.getsourcefile(func))
+                repo_root, relative_file_path = get_repo_root_and_relative_path(abs_file_path)
+                if relative_file_path:
+                    file_path = relative_file_path
+                else:
+                    file_path = abs_file_path # Fallback to absolute path if not in a git repo
+                    logger.warning(f"Function '{function_name}' is not in a Git repository. "
+                                   f"PR creation might fail for absolute path: {file_path}")
+            except Exception as e:
+                file_path = ""
+                logger.error(f"Failed to determine file path for '{function_name}': {e}")
+
             static_properties = {
                 "function_name": function_name,
+                "file_path": file_path,
                 "module_name": module_name,
                 "docstring": docstring,
                 "source_code": source_code,
