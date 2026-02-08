@@ -289,9 +289,15 @@ def trace_span(
                             return_value_log = str(processed_result)
 
                 except Exception as e:
-                    status = "ERROR"
                     error_msg = traceback.format_exc()
                     error_code = _determine_error_code(tracer, e)
+
+                    if error_code in tracer.settings.ignored_error_codes:
+                        status = "FAILURE"
+                        tracer.alert_sent = True
+                    else:
+                        status = "ERROR"
+
                     span_properties = _create_span_properties(
                         tracer, func, start_time, status, error_msg, error_code, captured_attributes,
                         my_span_id=my_span_id, parent_span_id=parent_span_id,
@@ -401,9 +407,15 @@ def trace_span(
                             return_value_log = str(processed_result)
 
                 except Exception as e:
-                    status = "ERROR"
                     error_msg = traceback.format_exc()
                     error_code = _determine_error_code(tracer, e)
+
+                    if error_code in tracer.settings.ignored_error_codes:
+                        status = "FAILURE"
+                        tracer.alert_sent = True
+                    else:
+                        status = "ERROR"
+
                     span_properties = _create_span_properties(
                         tracer, func, start_time, status, error_msg, error_code, captured_attributes,
                         my_span_id=my_span_id, parent_span_id=parent_span_id,
