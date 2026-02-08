@@ -103,7 +103,7 @@ def test_get_settings_invalid_json(mock_json_load, mock_open_file, mock_exists, 
     # Act
     settings = get_weaviate_settings()
 
-    assert mock_exists.call_count == 2
+    assert mock_exists.call_count == 3
     assert settings.custom_properties is None  # Should be None due to parsing failure
 
     # Check if 'Could not parse JSON' warning was logged

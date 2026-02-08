@@ -283,8 +283,8 @@ def test_create_schema_with_custom_properties(settings_with_custom_props):
     assert exp_id_prop.description == "Identifier for the experiment"
 
 
-    # Check total property count (5 base + 2 custom)
-    assert len(passed_props_list) == 6 + 2
+    # Check total property count (7 base + 2 custom)
+    assert len(passed_props_list) == 7 + 2
 
 
 def test_create_schema_custom_prop_invalid_type(settings_with_invalid_type_prop):
