@@ -41,10 +41,17 @@ class WeaviateSettings(BaseSettings):
 
     CUSTOM_PROPERTIES_FILE_PATH: str = ".weaviate_properties"
     FAILURE_MAPPING_FILE_PATH: str = ".vectorwave_errors.json"
+    IGNORE_ERROR_FILE_PATH: str = ".vtwignore"
+
+    GITHUB_TOKEN: Optional[str] = None
+    GITHUB_REPO_NAME: Optional[str] = None
+    GITHUB_BASE_BRANCH: str = "main"
 
     custom_properties: Optional[Dict[str, Dict[str, Any]]] = None
     global_custom_values: Optional[Dict[str, Any]] = None
     failure_mapping: Optional[Dict[str, str]] = None
+
+    ignored_error_codes: Set[str] = set()
 
     ALERTER_STRATEGY: str = "none"
     ALERTER_WEBHOOK_URL: Optional[str] = None
@@ -127,6 +134,17 @@ def get_weaviate_settings() -> WeaviateSettings:
             logger.warning(f"Could not read or parse '{error_file_path}': {e}")
     elif error_file_path:
         logger.info(f"Note: Failure mapping file not found at '{error_file_path}'. Skipping.")
+
+    ignore_file_path = settings.IGNORE_ERROR_FILE_PATH
+    if ignore_file_path and os.path.exists(ignore_file_path):
+        logger.info(f"Loading ignore error codes from '{ignore_file_path}'...")
+        try:
+            with open(ignore_file_path, 'r', encoding='utf-8') as f:
+                codes = {line.strip() for line in f if line.strip() and not line.startswith('#')}
+                settings.ignored_error_codes = codes
+                logger.info(f"Loaded {len(codes)} ignored error codes.")
+        except Exception as e:
+            logger.warning(f"Could not read '{ignore_file_path}': {e}")
 
     try:
         settings.sensitive_keys = {
