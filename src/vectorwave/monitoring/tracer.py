@@ -265,7 +265,9 @@ def trace_span(
                     attributes_to_capture, args, kwargs, func, tracer.settings.sensitive_keys
                 )
 
-                if capture_return_value:
+                _is_replay = execution_source_context.get() == "REPLAY"
+
+                if capture_return_value and not _is_replay:
                     vectorizer = get_vectorizer()
                     if vectorizer:
                         input_vector_data = _create_input_vector_data(
@@ -342,7 +344,7 @@ def trace_span(
                             span_properties["error_code"] = "SEMANTIC_DRIFT"
                             span_properties["error_message"] = drift_alert_props["error_message"]
 
-                    if span_properties:
+                    if span_properties and not _is_replay:
                         try:
                             tracer.batch.add_object(
                                 collection=tracer.settings.EXECUTION_COLLECTION_NAME,
@@ -380,7 +382,9 @@ def trace_span(
                     attributes_to_capture, args, kwargs, func, tracer.settings.sensitive_keys
                 )
 
-                if capture_return_value:
+                _is_replay = execution_source_context.get() == "REPLAY"
+
+                if capture_return_value and not _is_replay:
                     vectorizer = get_vectorizer()
                     if vectorizer:
                         input_vector_data = _create_input_vector_data(
@@ -428,7 +432,7 @@ def trace_span(
                             capture_return_value=capture_return_value, result=return_value_log
                         )
 
-                    if span_properties:
+                    if span_properties and not _is_replay:
                         try:
                             tracer.batch.add_object(
                                 collection=tracer.settings.EXECUTION_COLLECTION_NAME,
