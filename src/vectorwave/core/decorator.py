@@ -196,7 +196,7 @@ def vectorize(search_description: Optional[str] = None,
 
             @wraps(func)
             async def outer_wrapper(*args, **kwargs):
-                if semantic_cache and execution_source_context.get() != "REPLAY":
+                if semantic_cache:
                     filters = resolve_semantic_filters(args, kwargs)
                     cached = _check_and_return_cached_result(func, args, kwargs, function_name, cache_threshold, True, filters=filters)
                     if cached is not None: return cached
@@ -221,7 +221,7 @@ def vectorize(search_description: Optional[str] = None,
 
             @wraps(func)
             def outer_wrapper(*args, **kwargs):
-                if semantic_cache and execution_source_context.get() != "REPLAY":
+                if semantic_cache:
                     filters = resolve_semantic_filters(args, kwargs)
                     cached = _check_and_return_cached_result(func, args, kwargs, function_name, cache_threshold, False, filters=filters)
                     if cached is not None: return cached
