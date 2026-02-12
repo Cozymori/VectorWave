@@ -27,10 +27,17 @@ class WeaviateBatchManager:
     Uses High-Performance Rust Core if available, otherwise falls back to Python.
     """
 
-    def __init__(self):
+    def __init__(self, host: Optional[str] = None, port: Optional[int] = None,
+                 grpc_port: Optional[int] = None, api_key: Optional[str] = None):
         self._initialized = False
         self.settings: WeaviateSettings = get_weaviate_settings()
         self.client: Optional[weaviate.WeaviateClient] = None
+
+        # Store dynamic connection params
+        self._host = host
+        self._port = port
+        self._grpc_port = grpc_port
+        self._api_key = api_key
 
         # Batch Configuration
         self.batch_threshold = self.settings.BATCH_THRESHOLD
@@ -60,7 +67,13 @@ class WeaviateBatchManager:
     def _connect_client(self):
         """Attempts to connect to Weaviate."""
         try:
-            self.client = get_weaviate_client(self.settings)
+            if self._host is not None:
+                self.client = get_weaviate_client(
+                    host=self._host, port=self._port,
+                    grpc_port=self._grpc_port, api_key=self._api_key
+                )
+            else:
+                self.client = get_weaviate_client(self.settings)
             if self.client:
                 self._initialized = True
         except Exception as e:
@@ -171,6 +184,11 @@ class WeaviateBatchManager:
             except:
                 pass
 
-@lru_cache(None)
-def get_batch_manager() -> WeaviateBatchManager:
-    return WeaviateBatchManager()
+@lru_cache()
+def get_batch_manager(
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        grpc_port: Optional[int] = None,
+        api_key: Optional[str] = None
+) -> WeaviateBatchManager:
+    return WeaviateBatchManager(host=host, port=port, grpc_port=grpc_port, api_key=api_key)

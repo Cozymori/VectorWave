@@ -1,5 +1,6 @@
 import logging
 from functools import lru_cache
+from typing import Optional
 
 import weaviate
 import weaviate.classes.config as wvc
@@ -17,18 +18,49 @@ from weaviate.exceptions import WeaviateConnectionError as WeaviateClientConnect
 logger = logging.getLogger(__name__)
 
 
-def get_weaviate_client(settings: WeaviateSettings) -> weaviate.WeaviateClient:
+def get_weaviate_client(
+        settings: WeaviateSettings = None,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        grpc_port: Optional[int] = None,
+        api_key: Optional[str] = None
+) -> weaviate.WeaviateClient:
     try:
-        client = weaviate.connect_to_local(
-            host=settings.WEAVIATE_HOST,
-            port=settings.WEAVIATE_PORT,
-            grpc_port=settings.WEAVIATE_GRPC_PORT,
-            additional_config=AdditionalConfig(
-                dynamic=True,
-                batch_size=20,
-                timeout_retries=3
+        if host is not None and api_key is not None:
+            # Cloud (WCS) connection with API key
+            client = weaviate.connect_to_wcs(
+                cluster_url=host,
+                auth_credentials=weaviate.auth.AuthApiKey(api_key),
+                additional_config=AdditionalConfig(
+                    timeout_retries=3
+                )
             )
-        )
+        elif host is not None:
+            # Local connection with custom host/port
+            client = weaviate.connect_to_local(
+                host=host,
+                port=port or 8080,
+                grpc_port=grpc_port or 50051,
+                additional_config=AdditionalConfig(
+                    dynamic=True,
+                    batch_size=20,
+                    timeout_retries=3
+                )
+            )
+        else:
+            # Default: local connection from settings (existing behavior)
+            if settings is None:
+                settings = get_weaviate_settings()
+            client = weaviate.connect_to_local(
+                host=settings.WEAVIATE_HOST,
+                port=settings.WEAVIATE_PORT,
+                grpc_port=settings.WEAVIATE_GRPC_PORT,
+                additional_config=AdditionalConfig(
+                    dynamic=True,
+                    batch_size=20,
+                    timeout_retries=3
+                )
+            )
     except WeaviateClientConnectionError as e:
         raise WeaviateConnectionError(f"Failed to connect to Weaviate: {e}")
     except Exception as e:
@@ -42,10 +74,19 @@ def get_weaviate_client(settings: WeaviateSettings) -> weaviate.WeaviateClient:
 
 
 @lru_cache()
-def get_cached_client() -> weaviate.WeaviateClient:
-    logger.debug("Creating and caching new Weaviate client instance")
-    settings = get_weaviate_settings()
-    client = get_weaviate_client(settings)
+def get_cached_client(
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        grpc_port: Optional[int] = None,
+        api_key: Optional[str] = None
+) -> weaviate.WeaviateClient:
+    if host is not None:
+        logger.debug("Creating and caching dynamic Weaviate client for host=%s", host)
+        client = get_weaviate_client(host=host, port=port, grpc_port=grpc_port, api_key=api_key)
+    else:
+        logger.debug("Creating and caching default Weaviate client instance")
+        settings = get_weaviate_settings()
+        client = get_weaviate_client(settings)
     return client
 
 
