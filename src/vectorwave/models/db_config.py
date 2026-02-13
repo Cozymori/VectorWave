@@ -20,6 +20,7 @@ class WeaviateSettings(BaseSettings):
     WEAVIATE_HOST: str = "localhost"
     WEAVIATE_PORT: int = 8080
     WEAVIATE_GRPC_PORT: int = 50051
+    WEAVIATE_API_KEY: Optional[str] = None
     COLLECTION_NAME: str = "VectorWaveFunctions"
     EXECUTION_COLLECTION_NAME: str = "VectorWaveExecutions"
     GOLDEN_COLLECTION_NAME: str = "VectorWaveGoldenDataset"

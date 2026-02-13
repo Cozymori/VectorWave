@@ -51,16 +51,28 @@ def get_weaviate_client(
             # Default: local connection from settings (existing behavior)
             if settings is None:
                 settings = get_weaviate_settings()
-            client = weaviate.connect_to_local(
-                host=settings.WEAVIATE_HOST,
-                port=settings.WEAVIATE_PORT,
-                grpc_port=settings.WEAVIATE_GRPC_PORT,
-                additional_config=AdditionalConfig(
-                    dynamic=True,
-                    batch_size=20,
-                    timeout_retries=3
+
+            if settings.WEAVIATE_API_KEY:
+                logger.info(f"Connecting to Weaviate Cloud: {settings.WEAVIATE_HOST}")
+                client = weaviate.connect_to_wcs(
+                    cluster_url=settings.WEAVIATE_HOST,
+                    auth_credentials=weaviate.auth.AuthApiKey(settings.WEAVIATE_API_KEY),
+                    additional_config=AdditionalConfig(
+                        timeout_retries=3
+                    )
                 )
-            )
+            else:
+                logger.info(f"Connecting to Local Weaviate: {settings.WEAVIATE_HOST}")
+                client = weaviate.connect_to_local(
+                    host=settings.WEAVIATE_HOST,
+                    port=settings.WEAVIATE_PORT,
+                    grpc_port=settings.WEAVIATE_GRPC_PORT,
+                    additional_config=AdditionalConfig(
+                        dynamic=True,
+                        batch_size=20,
+                        timeout_retries=3
+                    )
+                )
     except WeaviateClientConnectionError as e:
         raise WeaviateConnectionError(f"Failed to connect to Weaviate: {e}")
     except Exception as e:
