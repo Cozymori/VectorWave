@@ -68,6 +68,8 @@ class WeaviateSettings(BaseSettings):
     SENSITIVE_FIELD_NAMES: str = "password,api_key,token,secret,auth_token"
     sensitive_keys: Set[str] = set()
 
+    ASYNC_LOGGING: bool = False
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra='ignore')
 
 
