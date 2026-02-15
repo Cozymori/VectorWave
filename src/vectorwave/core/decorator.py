@@ -13,7 +13,7 @@ from ..utils.function_cache import function_cache_manager
 from ..utils.return_caching_utils import _check_and_return_cached_result
 from ..vectorizer.factory import get_vectorizer
 from ..utils.context import execution_source_context
-from ..utils.path_utils import get_repo_root_and_relative_path # New import
+from ..utils.path_utils import get_repo_root_and_relative_path
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ def vectorize(search_description: Optional[str] = None,
                 if relative_file_path:
                     file_path = relative_file_path
                 else:
-                    file_path = abs_file_path # Fallback to absolute path if not in a git repo
+                    file_path = abs_file_path
                     logger.warning(f"Function '{function_name}' is not in a Git repository. "
                                    f"PR creation might fail for absolute path: {file_path}")
             except Exception as e:
@@ -187,7 +187,11 @@ def vectorize(search_description: Optional[str] = None,
 
         if is_async_func:
             @trace_root()
-            @trace_span(attributes_to_capture=final_attributes, capture_return_value=capture_return_value)
+            @trace_span(
+                attributes_to_capture=final_attributes,
+                capture_return_value=capture_return_value,
+                force_sync=semantic_cache  # Force sync if semantic cache is enabled
+            )
             @wraps(func)
             async def inner_wrapper(*args, **kwargs):
                 clean_kwargs = {k: v for k, v in kwargs.items() if
@@ -212,7 +216,11 @@ def vectorize(search_description: Optional[str] = None,
 
         else:  # Sync wrapper
             @trace_root()
-            @trace_span(attributes_to_capture=final_attributes, capture_return_value=capture_return_value)
+            @trace_span(
+                attributes_to_capture=final_attributes,
+                capture_return_value=capture_return_value,
+                force_sync=semantic_cache  # Force sync if semantic cache is enabled
+            )
             @wraps(func)
             def inner_wrapper(*args, **kwargs):
                 clean_kwargs = {k: v for k, v in kwargs.items() if
