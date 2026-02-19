@@ -129,11 +129,11 @@ def test_execution_source_capture_in_async(mock_tracer):
 
             context_func()
 
-            # Check submit arguments (last argument is exec_source)
-            args = mock_submit.call_args[0]
-            captured_source = args[-1]
+            # submit is called as submit(fn, SpanContext) — check exec_source inside SpanContext
+            call_args = mock_submit.call_args[0]
+            span_ctx = call_args[-1]  # SpanContext is the last positional arg
 
-            assert captured_source == test_source, f"Expected '{test_source}', but got '{captured_source}'"
+            assert span_ctx.exec_source == test_source, f"Expected '{test_source}', but got '{span_ctx.exec_source}'"
 
     finally:
         execution_source_context.reset(token)

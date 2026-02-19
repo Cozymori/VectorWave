@@ -4,10 +4,15 @@ import time
 
 # --- 경로 설정 ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(current_dir)
 src_path = os.path.abspath(os.path.join(current_dir, "../src"))
 
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
+
+project_root = os.path.abspath(os.path.join(current_dir, ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 # --- 모듈 임포트 ---
 from vectorwave import initialize_database

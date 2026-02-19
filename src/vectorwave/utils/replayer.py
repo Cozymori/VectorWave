@@ -14,6 +14,7 @@ from ..database.db import get_cached_client
 from ..models.db_config import get_weaviate_settings
 import vectorwave.vectorwave_core as vectorwave_core
 from .context import execution_source_context
+from .serialization import deserialize_return_value
 
 logger = logging.getLogger(__name__)
 
@@ -38,65 +39,75 @@ class VectorWaveReplayer:
         Retrieves past execution history (Golden Data First -> Standard Logs),
         re-executes the function, and validates the result.
         """
-        # 1. Dynamic Function Loading
+        target_func, test_objects, results = self._load_and_fetch(function_full_name, limit)
+        if target_func is None:
+            return results
+
+        logger.info(f"Starting Replay: {len(test_objects)} logs for '{function_full_name}'")
+        return self._run_replay_loop(
+            target_func, test_objects, results, update_baseline,
+            compare_fn=lambda exp, act: (self._compare_results(exp, act), None, {})
+        )
+
+    def _load_and_fetch(self, function_full_name: str, limit: int):
+        """Load function and fetch test candidates. Returns (target_func, test_objects, results_stub)."""
+        results = {
+            "function": function_full_name,
+            "total": 0, "passed": 0, "failed": 0, "updated": 0, "failures": []
+        }
         try:
             module_name, func_short_name = function_full_name.rsplit('.', 1)
             module = importlib.import_module(module_name)
             target_func = getattr(module, func_short_name)
         except (ValueError, ImportError, AttributeError) as e:
             logger.error(f"Could not load function: {function_full_name}. Error: {e}")
-            return {"error": f"Function loading failed: {e}"}
+            results["error"] = f"Function loading failed: {e}"
+            return None, [], results
 
-        is_async_func = inspect.iscoroutinefunction(target_func)
-
-        # 2. Retrieve Test Data (Priority: Golden > Standard)
         test_objects = self._fetch_test_candidates(func_short_name, limit)
-
-        results = {
-            "function": function_full_name,
-            "total": 0,
-            "passed": 0,
-            "failed": 0,
-            "updated": 0,
-            "failures": []
-        }
-
         if not test_objects:
             logger.warning(f"No data found to test: {function_full_name}")
-            return results
+        return target_func, test_objects, results
 
-        logger.info(f"Starting Replay: {len(test_objects)} logs for '{function_full_name}'")
+    def _run_replay_loop(
+            self,
+            target_func,
+            test_objects: List[Dict[str, Any]],
+            results: Dict[str, Any],
+            update_baseline: bool,
+            compare_fn
+    ) -> Dict[str, Any]:
+        """
+        Core replay loop. compare_fn(expected, actual) -> (is_match, reason, extra_failure_fields).
+        'reason' may be None; 'extra_failure_fields' is merged into the failure entry.
+        """
+        is_async_func = inspect.iscoroutinefunction(target_func)
 
         for obj_data in test_objects:
             results["total"] += 1
-
-            # Unpack data
             uuid_str = obj_data['uuid']
             raw_inputs = obj_data['inputs']
             expected_output = obj_data['expected_output']
             is_golden = obj_data.get('is_golden', False)
-
-            # [FIX] Extract only valid arguments for the target function
             inputs = self._extract_inputs(raw_inputs, target_func)
 
             token = None
             try:
                 token = execution_source_context.set("REPLAY")
-
-                # 3. Function Re-execution
                 if is_async_func:
                     actual_output = asyncio.run(target_func(**inputs))
                 else:
                     actual_output = target_func(**inputs)
 
-                # 4. Result Validation
-                is_match = self._compare_results(expected_output, actual_output)
+                is_match, reason, extra_fields = compare_fn(expected_output, actual_output)
+
+                tag = f" ({reason})" if reason else ""
+                golden_tag = " [GOLDEN]" if is_golden else ""
 
                 if is_match:
                     results["passed"] += 1
-                    logger.debug(f"UUID {uuid_str}: PASSED {'(Golden)' if is_golden else ''}")
+                    logger.debug(f"UUID {uuid_str}: PASSED{tag}{golden_tag}")
                 else:
-                    # 5. Handle Mismatch
                     if update_baseline:
                         self._update_baseline_value(uuid_str, actual_output, is_golden)
                         results["updated"] += 1
@@ -104,35 +115,32 @@ class VectorWaveReplayer:
                         logger.info(f"UUID {uuid_str}: Baseline UPDATED")
                     else:
                         results["failed"] += 1
-                        diff_html = self._generate_diff_html(expected_output, actual_output)
-
-                        results["failures"].append({
+                        failure_entry = {
                             "uuid": uuid_str,
                             "inputs": inputs,
                             "expected": expected_output,
                             "actual": actual_output,
-                            "diff_html": diff_html,
-                            "is_golden": is_golden
-                        })
-                        logger.warning(f"UUID {uuid_str}: FAILED (Mismatch) {'[GOLDEN]' if is_golden else ''}")
+                            "diff_html": self._generate_diff_html(expected_output, actual_output),
+                            "is_golden": is_golden,
+                        }
+                        failure_entry.update(extra_fields)
+                        results["failures"].append(failure_entry)
+                        logger.warning(f"UUID {uuid_str}: FAILED{tag or ' (Mismatch)'}{golden_tag}")
 
             except Exception as e:
                 results["failed"] += 1
-                error_msg = f"Exception: {str(e)}"
                 logger.error(f"UUID {uuid_str}: EXECUTION ERROR - {e}")
-
                 results["failures"].append({
                     "uuid": uuid_str,
                     "inputs": inputs,
                     "expected": expected_output,
                     "actual": "EXCEPTION_RAISED",
-                    "error": error_msg,
+                    "error": f"Exception: {str(e)}",
                     "diff_html": f"<div class='error'>{traceback.format_exc()}</div>",
                     "traceback": traceback.format_exc()
                 })
-
             finally:
-                if token:
+                if token is not None:
                     execution_source_context.reset(token)
 
         logger.info(f"Replay Finished. Passed: {results['passed']}, Failed: {results['failed']}")
@@ -161,7 +169,7 @@ class VectorWaveReplayer:
                     continue
 
                 original_log = exec_col.query.fetch_object_by_id(original_uuid)
-                if not original_log:
+                if original_log is None:
                     logger.warning(f"Golden Data {obj.uuid} refers to missing log {original_uuid}. Skipping.")
                     continue
 
@@ -219,12 +227,7 @@ class VectorWaveReplayer:
             return props
 
     def _deserialize_value(self, value: Any) -> Any:
-        if isinstance(value, str):
-            try:
-                return json.loads(value)
-            except (json.JSONDecodeError, TypeError):
-                return value
-        return value
+        return deserialize_return_value(value)
 
     def _compare_results(self, expected: Any, actual: Any) -> bool:
         if expected == actual: return True

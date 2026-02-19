@@ -49,7 +49,3 @@ def get_registered_functions() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Registered function list search failed: {e}")
         return []
-
-    except Exception as e:
-        logger.error(f"Failed to retrieve registered function list: {e}")
-        return []

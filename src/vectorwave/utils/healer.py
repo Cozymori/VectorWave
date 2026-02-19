@@ -37,7 +37,7 @@ class VectorWaveHealer:
         Analyzes recent errors of a specific function and suggests corrected code.
         If create_pr is True, it attempts to create a GitHub Pull Request with the fix.
         """
-        if not self.client:
+        if self.client is None:
             return "❌ OpenAI client initialization failed."
 
         print(f"🕵️ Analyzing function: '{function_name}'...")

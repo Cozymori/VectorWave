@@ -68,7 +68,7 @@ def search_and_answer(query: str, model: str = "gpt-4-turbo", language: str = "e
 
     # 3. Generate (LLM Response)
     client = _get_openai_client()
-    if not client:
+    if client is None:
         msg = "❌ OpenAI client could not be initialized. (Check .env settings)"
         return msg if language == 'en' else "❌ OpenAI 클라이언트를 초기화할 수 없습니다. (.env 설정 확인 필요)"
 
@@ -133,7 +133,7 @@ def analyze_trace_log(trace_id: str, model: str = "gpt-4-turbo", language: str =
 
     # 3. Generate
     client = _get_openai_client()
-    if not client:
+    if client is None:
         msg = "❌ OpenAI client initialization failed."
         return msg if language == 'en' else "❌ OpenAI 클라이언트 초기화 실패"
 

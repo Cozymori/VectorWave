@@ -37,7 +37,7 @@ class VectorWaveDatasetManager:
                 include_vector=True
             )
 
-            if not log_obj:
+            if log_obj is None:
                 logger.error(f"Log UUID '{log_uuid}' not found.")
                 return False
 
@@ -55,9 +55,17 @@ class VectorWaveDatasetManager:
             }
 
             # 3. Save (reuse original vector)
+            vector = (log_obj.vector or {}).get("default")
+            if vector is None:
+                logger.error(
+                    f"Log '{log_uuid}' has no stored vector. "
+                    "The source function must have capture_return_value=True for vector storage."
+                )
+                return False
+
             self.golden_col.data.insert(
                 properties=golden_props,
-                vector=log_obj.vector["default"],  # Copy vector
+                vector=vector,
                 uuid=generate_uuid5(log_uuid)  # Regenerate to avoid UUID collision, or maintain relation with original
             )
             logger.info(f"✅ Registered log {log_uuid} as Golden Data.")

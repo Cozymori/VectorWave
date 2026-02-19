@@ -9,8 +9,9 @@ import weaviate.classes.query as wvc_query
 from weaviate.classes.query import Filter
 
 from ..models.db_config import get_weaviate_settings, WeaviateSettings
-from ..monitoring.tracer import _create_input_vector_data, _deserialize_return_value, current_tracer_var, \
+from ..monitoring.tracer import _create_input_vector_data, current_tracer_var, \
     current_span_id_var
+from .serialization import deserialize_return_value as _deserialize_return_value
 from ..database.db_search import search_similar_execution, _build_weaviate_filters
 from ..vectorizer.factory import get_vectorizer
 from ..batch.batch import get_batch_manager

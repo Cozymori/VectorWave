@@ -88,7 +88,7 @@ def search_errors_by_message(
         weaviate_filter = _build_weaviate_filters(base_filters)
 
         vectorizer = get_vectorizer()
-        if not vectorizer:
+        if vectorizer is None:
             logger.error(
                 "Cannot perform vector search: No Python vectorizer (e.g., 'huggingface' or 'openai_client') is configured in .env.")
             raise WeaviateConnectionError("Cannot perform vector search: No Python vectorizer configured.")
@@ -142,7 +142,7 @@ def search_functions(query: str, limit: int = 5, filters: Optional[Dict[str, Any
 
         vectorizer = get_vectorizer()
 
-        if vectorizer:
+        if vectorizer is not None:
             print("[VectorWave] Searching with Python client (near_vector)...")
             try:
                 query_vector = vectorizer.embed(query)
@@ -305,7 +305,7 @@ def search_functions_hybrid(
         vectorizer = get_vectorizer()
 
         # 1. Python Vectorizer
-        if vectorizer:
+        if vectorizer is not None:
             logger.info(f"[Hybrid] Vectorizing query with Python client... (alpha={alpha})")
             try:
                 query_vector = vectorizer.embed(query)
@@ -415,7 +415,7 @@ def simulate_drift_check(
         settings = get_weaviate_settings()
         vectorizer = get_vectorizer()
 
-        if not vectorizer:
+        if vectorizer is None:
             return {"error": "No vectorizer configured."}
 
         # 1. Set defaults from settings if not provided

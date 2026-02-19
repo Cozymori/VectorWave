@@ -137,25 +137,16 @@ def _create_property_from_config(name: str, prop_details: dict) -> wvc.Property:
     )
 
 
-def create_vectorwave_schema(client: weaviate.WeaviateClient, settings: WeaviateSettings):
-    collection_name = settings.COLLECTION_NAME
+def _get_existing_collection(client: weaviate.WeaviateClient, name: str):
+    """Returns existing collection if it exists, or None."""
+    if client.collections.exists(name):
+        logger.info("Collection '%s' already exists, skipping creation", name)
+        return client.collections.get(name)
+    return None
 
-    if client.collections.exists(collection_name):
-        logger.info("Collection '%s' already exists, skipping creation", collection_name)
-        return client.collections.get(collection_name)
 
-    logger.info("Creating collection '%s'", collection_name)
-
-    base_properties = [
-        wvc.Property(name="function_name", data_type=wvc.DataType.TEXT),
-        wvc.Property(name="module_name", data_type=wvc.DataType.TEXT),
-        wvc.Property(name="docstring", data_type=wvc.DataType.TEXT),
-        wvc.Property(name="source_code", data_type=wvc.DataType.TEXT),
-        wvc.Property(name="search_description", data_type=wvc.DataType.TEXT),
-        wvc.Property(name="sequence_narrative", data_type=wvc.DataType.TEXT),
-        wvc.Property(name="file_path",data_type=wvc.DataType.TEXT),
-    ]
-
+def _build_custom_properties(settings: WeaviateSettings, collection_name: str):
+    """Builds custom wvc.Property list from settings.custom_properties."""
     custom_properties = []
     if settings.custom_properties:
         logger.info(f"Adding {len(settings.custom_properties)} custom properties to '{collection_name}'")
@@ -166,8 +157,41 @@ def create_vectorwave_schema(client: weaviate.WeaviateClient, settings: Weaviate
             except Exception as e:
                 logger.error(f"Invalid property definition for '{name}': {e}")
                 raise SchemaCreationError(f"Invalid property definition for '{name}': {e}")
+    return custom_properties
 
-    all_properties = base_properties + custom_properties
+
+def _create_collection_safe(client, name, properties, vectorizer_config, generative_config=None):
+    """Creates a collection with standardized error handling."""
+    logger.info("Creating collection '%s'", name)
+    try:
+        return client.collections.create(
+            name=name,
+            properties=properties,
+            vectorizer_config=vectorizer_config,
+            generative_config=generative_config
+        )
+    except Exception as e:
+        raise SchemaCreationError(f"Error creating collection '{name}': {e}")
+
+
+def create_vectorwave_schema(client: weaviate.WeaviateClient, settings: WeaviateSettings):
+    collection_name = settings.COLLECTION_NAME
+
+    existing = _get_existing_collection(client, collection_name)
+    if existing is not None:
+        return existing
+
+    base_properties = [
+        wvc.Property(name="function_name", data_type=wvc.DataType.TEXT),
+        wvc.Property(name="module_name", data_type=wvc.DataType.TEXT),
+        wvc.Property(name="docstring", data_type=wvc.DataType.TEXT),
+        wvc.Property(name="source_code", data_type=wvc.DataType.TEXT),
+        wvc.Property(name="search_description", data_type=wvc.DataType.TEXT),
+        wvc.Property(name="sequence_narrative", data_type=wvc.DataType.TEXT),
+        wvc.Property(name="file_path", data_type=wvc.DataType.TEXT),
+    ]
+
+    all_properties = base_properties + _build_custom_properties(settings, collection_name)
 
     vector_config = wvc.Configure.Vectorizer.none()
     generative_config = None
@@ -181,25 +205,15 @@ def create_vectorwave_schema(client: weaviate.WeaviateClient, settings: Weaviate
     elif settings.VECTORIZER.lower() not in ["none", "huggingface", "openai_client"]:
         raise SchemaCreationError(f"Invalid VECTORIZER setting: {settings.VECTORIZER}")
 
-    try:
-        return client.collections.create(
-            name=collection_name,
-            properties=all_properties,
-            vectorizer_config=vector_config,
-            generative_config=generative_config
-        )
-    except Exception as e:
-        raise SchemaCreationError(f"Error during schema creation: {e}")
+    return _create_collection_safe(client, collection_name, all_properties, vector_config, generative_config)
 
 
 def create_execution_schema(client: weaviate.WeaviateClient, settings: WeaviateSettings):
     collection_name = settings.EXECUTION_COLLECTION_NAME
 
-    if client.collections.exists(collection_name):
-        logger.info("Collection '%s' already exists, skipping creation", collection_name)
-        return client.collections.get(collection_name)
-
-    logger.info("Creating collection '%s'", collection_name)
+    existing = _get_existing_collection(client, collection_name)
+    if existing is not None:
+        return existing
 
     properties = [
         wvc.Property(name="trace_id", data_type=wvc.DataType.TEXT),
@@ -215,35 +229,17 @@ def create_execution_schema(client: weaviate.WeaviateClient, settings: WeaviateS
         wvc.Property(name="return_value", data_type=wvc.DataType.TEXT),
         wvc.Property(name="exec_source", data_type=wvc.DataType.TEXT)
     ]
+    properties += _build_custom_properties(settings, collection_name)
 
-    if settings.custom_properties:
-        logger.info(f"Adding {len(settings.custom_properties)} custom properties to '{collection_name}'")
-        for name, prop_details in settings.custom_properties.items():
-            try:
-                prop = _create_property_from_config(name, prop_details)
-                properties.append(prop)
-            except Exception as e:
-                logger.error(f"Invalid property definition for '{name}': {e}")
-                raise SchemaCreationError(f"Invalid property definition for '{name}': {e}")
-
-    try:
-        return client.collections.create(
-            name=collection_name,
-            properties=properties,
-            vectorizer_config=wvc.Configure.Vectorizer.none(),
-        )
-    except Exception as e:
-        raise SchemaCreationError(f"Error during execution schema creation: {e}")
+    return _create_collection_safe(client, collection_name, properties, wvc.Configure.Vectorizer.none())
 
 
 def create_golden_dataset_schema(client: weaviate.WeaviateClient, settings: WeaviateSettings):
     collection_name = settings.GOLDEN_COLLECTION_NAME
 
-    if client.collections.exists(collection_name):
-        logger.info("Collection '%s' already exists.", collection_name)
-        return client.collections.get(collection_name)
-
-    logger.info("Creating collection '%s'", collection_name)
+    existing = _get_existing_collection(client, collection_name)
+    if existing is not None:
+        return existing
 
     properties = [
         wvc.Property(name="original_uuid", data_type=wvc.DataType.TEXT),
@@ -254,33 +250,18 @@ def create_golden_dataset_schema(client: weaviate.WeaviateClient, settings: Weav
         wvc.Property(name="created_at", data_type=wvc.DataType.DATE),
         wvc.Property(name="tags", data_type=wvc.DataType.TEXT_ARRAY)
     ]
+    properties += _build_custom_properties(settings, collection_name)
 
-    if settings.custom_properties:
-        logger.info(f"Adding {len(settings.custom_properties)} custom properties to '{collection_name}'")
-        for name, prop_details in settings.custom_properties.items():
-            try:
-                prop = _create_property_from_config(name, prop_details)
-                properties.append(prop)
-            except Exception as e:
-                logger.error(f"Invalid property definition for '{name}' in Golden Dataset: {e}")
-                raise SchemaCreationError(f"Invalid property definition for '{name}': {e}")
-
-    try:
-        return client.collections.create(
-            name=collection_name,
-            properties=properties,
-            vectorizer_config=wvc.Configure.Vectorizer.none(),
-        )
-    except Exception as e:
-        raise SchemaCreationError(f"Error creating Golden Dataset schema: {e}")
+    return _create_collection_safe(client, collection_name, properties, wvc.Configure.Vectorizer.none())
 
 
 def create_usage_schema(client: weaviate.WeaviateClient, settings: WeaviateSettings):
     collection_name = "VectorWaveTokenUsage"
-    if client.collections.exists(collection_name):
-        return client.collections.get(collection_name)
 
-    logger.info("Creating collection '%s'", collection_name)
+    existing = _get_existing_collection(client, collection_name)
+    if existing is not None:
+        return existing
+
     properties = [
         wvc.Property(name="timestamp_utc", data_type=wvc.DataType.DATE),
         wvc.Property(name="model", data_type=wvc.DataType.TEXT),
@@ -288,14 +269,8 @@ def create_usage_schema(client: weaviate.WeaviateClient, settings: WeaviateSetti
         wvc.Property(name="category", data_type=wvc.DataType.TEXT),
         wvc.Property(name="tokens", data_type=wvc.DataType.INT),
     ]
-    try:
-        return client.collections.create(
-            name=collection_name,
-            properties=properties,
-            vectorizer_config=wvc.Configure.Vectorizer.none(),
-        )
-    except Exception as e:
-        raise SchemaCreationError(f"Error usage schema: {e}")
+
+    return _create_collection_safe(client, collection_name, properties, wvc.Configure.Vectorizer.none())
 
 
 def update_database_schema():
@@ -351,7 +326,7 @@ def initialize_database():
     try:
         settings = get_weaviate_settings()
         client = get_cached_client()
-        if client:
+        if client is not None:
             create_vectorwave_schema(client, settings)
             create_execution_schema(client, settings)
             create_usage_schema(client, settings)

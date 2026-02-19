@@ -21,7 +21,7 @@ def generate_metadata_via_llm(source_code: str, func_name: str) -> Optional[Dict
     """Call LLM to generate description and narrative from source code."""
     settings = get_weaviate_settings()
     client = get_llm_client()
-    if not client:
+    if client is None:
         return None
 
     prompt = f"""
@@ -121,7 +121,7 @@ def generate_and_register_metadata():
 
         # 4. Vectorize the Description
         vector_to_add = None
-        if vectorizer and final_desc:
+        if vectorizer is not None and final_desc:
             try:
                 vector_to_add = vectorizer.embed(final_desc)
             except Exception as e:

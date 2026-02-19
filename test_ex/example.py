@@ -57,7 +57,8 @@ def step_5_get_user_balance():
     sequence_narrative="After payment is complete, a receipt is sent via email.",
     team="billing",
     priority=1,
-    replay=True
+    replay=True,
+    capture_inputs=True
 )
 def process_payment(user_id: str, amount: int):
     print(f"  [ROOT EXEC] process_payment: Processing payment...")
@@ -105,7 +106,8 @@ def calculate_loyalty_points(purchase_amount: int, is_vip: bool):
     search_description="Generate a summary of customer review.",
     team="ai-service",
     priority=2,
-    replay=True
+    replay=True,
+    capture_return_value=True
 )
 def generate_review_summary(review_text: str):
     """

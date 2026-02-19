@@ -1,27 +1,9 @@
-import sys
-import os
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Any
 
-# --- Path Setup ---
-# Assumes this file is in src/vectorwave/search/
-# Adds the top-level 'src' folder to sys.path to import other modules
-current_dir = os.path.dirname(os.path.abspath(__file__))
-src_root = os.path.dirname(os.path.dirname(current_dir))  # src/
-sys.path.insert(0, src_root)
-
-try:
-    # Import the low-level DB search function
-    #
-    from vectorwave.database.db_search import search_executions
-    from vectorwave import initialize_database
-    from vectorwave.database.db import get_cached_client
-except ImportError as e:
-    # Use logger for the error, but print is necessary if logger fails
-    print(f"Failed to import VectorWave module: {e}")
-    logging.error(f"Failed to import VectorWave module: {e}", exc_info=True)
-    sys.exit(1)
+from ..database.db_search import search_executions
+from ..database.db import get_cached_client
 
 # Set up a module-level logger
 logger = logging.getLogger(__name__)

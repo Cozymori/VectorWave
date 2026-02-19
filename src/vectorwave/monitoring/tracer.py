@@ -3,6 +3,7 @@ import inspect
 import time
 import traceback
 import json
+from dataclasses import dataclass
 from functools import wraps, lru_cache
 from contextvars import ContextVar
 from typing import Optional, List, Dict, Any, Callable
@@ -18,6 +19,7 @@ from .alert.factory import get_alerter
 from ..vectorizer.factory import get_vectorizer
 from ..database.db_search import check_semantic_drift
 from ..utils.context import execution_source_context
+from ..utils.serialization import deserialize_return_value as _deserialize_return_value
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,25 @@ class TraceCollector:
 
 current_tracer_var: ContextVar[Optional[TraceCollector]] = ContextVar('current_tracer', default=None)
 current_span_id_var: ContextVar[Optional[str]] = ContextVar('current_span_id', default=None)
+
+
+@dataclass
+class SpanContext:
+    """Bundles all per-span logging data to avoid long parameter lists."""
+    tracer: TraceCollector
+    func: Callable
+    start_time: float
+    status: str
+    error_msg: Optional[str]
+    error_code: Optional[str]
+    my_span_id: str
+    parent_span_id: Optional[str]
+    capture_return_value: bool
+    result: Any
+    attributes_to_capture: Optional[List[str]]
+    args: tuple
+    kwargs: Dict[str, Any]  # shallow-copied at creation to avoid race conditions
+    exec_source: Optional[str]
 
 
 @lru_cache(maxsize=2048)
@@ -191,42 +212,16 @@ def _create_input_vector_data(
     }
 
 
-def _deserialize_return_value(return_value_str: Optional[str]) -> Any:
-    """
-    Deserializes the return value string back to a Python object if possible.
-    Used by return_caching_utils.
-    """
-    if return_value_str is None:
-        return None
-    try:
-        return json.loads(return_value_str)
-    except (json.JSONDecodeError, TypeError):
-        return return_value_str
-
-
-def _perform_background_logging(
-        tracer: "TraceCollector",
-        func: Callable,
-        start_time: float,
-        status: str,
-        error_msg: Optional[str],
-        error_code: Optional[str],
-        my_span_id: str,
-        parent_span_id: Optional[str],
-        capture_return_value: bool,
-        result: Any,
-        attributes_to_capture: Optional[List[str]],
-        args: tuple,
-        kwargs: Dict[str, Any],
-        exec_source: Optional[str]
-):
+def _perform_background_logging(ctx: SpanContext):
     """
     Executes logging tasks (Vectorization, DB Insert, Drift Check) in the background.
+    Receives a SpanContext whose kwargs is already shallow-copied (race-condition safe).
     """
     try:
         # 1. Capture Attributes (Parsing inputs)
         captured_attributes = _capture_span_attributes(
-            attributes_to_capture, args, kwargs, func, tracer.settings.sensitive_keys
+            ctx.attributes_to_capture, ctx.args, ctx.kwargs, ctx.func,
+            ctx.tracer.settings.sensitive_keys
         )
 
         vector_to_add: Optional[List[float]] = None
@@ -234,77 +229,77 @@ def _perform_background_logging(
         vectorizer = get_vectorizer()
 
         # 2. Vectorize Inputs (If enabled)
-        if capture_return_value and vectorizer:
+        if ctx.capture_return_value and vectorizer is not None:
             try:
                 input_vector_data = _create_input_vector_data(
-                    func_name=func.__name__,
-                    args=args,
-                    kwargs=kwargs,
-                    sensitive_keys=tracer.settings.sensitive_keys
+                    func_name=ctx.func.__name__,
+                    args=ctx.args,
+                    kwargs=ctx.kwargs,
+                    sensitive_keys=ctx.tracer.settings.sensitive_keys
                 )
                 vector_to_add = vectorizer.embed(input_vector_data['text'])
             except Exception as ve:
-                logger.warning(f"Failed to vectorize input for '{func.__name__}': {ve}")
+                logger.warning(f"Failed to vectorize input for '{ctx.func.__name__}': {ve}")
 
         # 3. Process Result
-        if status == "SUCCESS" and capture_return_value:
-            processed_result = vectorwave_core.mask_and_serialize(result, list(tracer.settings.sensitive_keys))
+        if ctx.status == "SUCCESS" and ctx.capture_return_value:
+            processed_result = vectorwave_core.mask_and_serialize(
+                ctx.result, list(ctx.tracer.settings.sensitive_keys)
+            )
             try:
                 return_value_log = json.dumps(processed_result)
             except TypeError:
                 return_value_log = str(processed_result)
 
         # 4. Vectorize Error (If needed)
-        if status != "SUCCESS" and vectorizer:
+        if ctx.status != "SUCCESS" and vectorizer is not None:
             try:
-                vector_to_add = vectorizer.embed(str(error_msg))
+                vector_to_add = vectorizer.embed(str(ctx.error_msg))
             except Exception as ve:
                 logger.warning(f"Failed to vectorize error message: {ve}")
 
         # 5. Create Span Properties
         span_properties = _create_span_properties(
-            tracer=tracer,
-            func=func,
-            start_time=start_time,
-            status=status,
-            error_msg=error_msg,
-            error_code=error_code,
+            tracer=ctx.tracer,
+            func=ctx.func,
+            start_time=ctx.start_time,
+            status=ctx.status,
+            error_msg=ctx.error_msg,
+            error_code=ctx.error_code,
             captured_attributes=captured_attributes,
-            my_span_id=my_span_id,
-            parent_span_id=parent_span_id,
-            capture_return_value=capture_return_value,
-            result=return_value_log if status == "SUCCESS" else None,
-            exec_source=exec_source
+            my_span_id=ctx.my_span_id,
+            parent_span_id=ctx.parent_span_id,
+            capture_return_value=ctx.capture_return_value,
+            result=return_value_log if ctx.status == "SUCCESS" else None,
+            exec_source=ctx.exec_source
         )
 
         # 6. Alerting (If Failure)
-        if status != "SUCCESS":
+        if ctx.status != "SUCCESS":
             try:
-                # We assume alert logic handles deduplication or checks tracer.alert_sent if needed.
-                # Since this is a new execution context, we rely on the object state if passed,
-                # but tracer object is shared.
-                if not tracer.alert_sent:
-                    tracer.alerter.notify(span_properties)
-                    tracer.alert_sent = True
+                if not ctx.tracer.alert_sent:
+                    ctx.tracer.alerter.notify(span_properties)
+                    ctx.tracer.alert_sent = True
             except Exception as alert_e:
                 logger.warning(f"Alerter failed: {alert_e}")
 
         # 7. Semantic Drift Detection
-        if tracer.settings.DRIFT_DETECTION_ENABLED and vector_to_add and status == "SUCCESS":
+        if ctx.tracer.settings.DRIFT_DETECTION_ENABLED and vector_to_add and ctx.status == "SUCCESS":
             try:
                 is_drift, dist, nearest_id = check_semantic_drift(
-                    vector=vector_to_add, function_name=func.__name__,
-                    threshold=tracer.settings.DRIFT_DISTANCE_THRESHOLD,
-                    k=tracer.settings.DRIFT_NEIGHBOR_AMOUNT
+                    vector=vector_to_add, function_name=ctx.func.__name__,
+                    threshold=ctx.tracer.settings.DRIFT_DISTANCE_THRESHOLD,
+                    k=ctx.tracer.settings.DRIFT_NEIGHBOR_AMOUNT
                 )
                 if is_drift:
                     drift_alert_props = span_properties.copy()
                     drift_alert_props["status"] = "WARNING"
                     drift_alert_props["error_code"] = "SEMANTIC_DRIFT"
                     drift_alert_props["error_message"] = (
-                        f"Anomaly detected.\nDistance: {dist:.4f} (Threshold: {tracer.settings.DRIFT_DISTANCE_THRESHOLD})\nNearest: {nearest_id}"
+                        f"Anomaly detected.\nDistance: {dist:.4f} "
+                        f"(Threshold: {ctx.tracer.settings.DRIFT_DISTANCE_THRESHOLD})\nNearest: {nearest_id}"
                     )
-                    tracer.alerter.notify(drift_alert_props)
+                    ctx.tracer.alerter.notify(drift_alert_props)
 
                     span_properties["status"] = "ANOMALY"
                     span_properties["error_code"] = "SEMANTIC_DRIFT"
@@ -315,8 +310,8 @@ def _perform_background_logging(
         # 8. Batch Insert
         if span_properties:
             try:
-                tracer.batch.add_object(
-                    collection=tracer.settings.EXECUTION_COLLECTION_NAME,
+                ctx.tracer.batch.add_object(
+                    collection=ctx.tracer.settings.EXECUTION_COLLECTION_NAME,
                     properties=span_properties,
                     vector=vector_to_add
                 )
@@ -324,7 +319,18 @@ def _perform_background_logging(
                 logger.error("Failed to log span: %s", e)
 
     except Exception as e:
-        logger.error(f"Background logging failed for '{func.__name__}': {e}")
+        logger.error(f"Background logging failed for '{ctx.func.__name__}': {e}")
+
+
+def _init_trace_root(kwargs):
+    """Setup for trace_root. Returns token or None if already inside a trace."""
+    if current_tracer_var.get() is not None:
+        return None
+    trace_id = kwargs.pop('trace_id', str(uuid4()))
+    tracer = TraceCollector(trace_id=trace_id)
+    token = current_tracer_var.set(tracer)
+    current_span_id_var.set(None)
+    return token
 
 
 def trace_root() -> Callable:
@@ -332,14 +338,9 @@ def trace_root() -> Callable:
         if inspect.iscoroutinefunction(func):
             @wraps(func)
             async def async_wrapper(*args, **kwargs):
-                if current_tracer_var.get() is not None:
+                token = _init_trace_root(kwargs)
+                if token is None:
                     return await func(*args, **kwargs)
-
-                trace_id = kwargs.pop('trace_id', str(uuid4()))
-                tracer = TraceCollector(trace_id=trace_id)
-                token = current_tracer_var.set(tracer)
-                current_span_id_var.set(None)
-
                 try:
                     return await func(*args, **kwargs)
                 finally:
@@ -348,20 +349,28 @@ def trace_root() -> Callable:
         else:
             @wraps(func)
             def sync_wrapper(*args, **kwargs):
-                if current_tracer_var.get() is not None:
+                token = _init_trace_root(kwargs)
+                if token is None:
                     return func(*args, **kwargs)
-
-                trace_id = kwargs.pop('trace_id', str(uuid4()))
-                tracer = TraceCollector(trace_id=trace_id)
-                token = current_tracer_var.set(tracer)
-                current_span_id_var.set(None)
-
                 try:
                     return func(*args, **kwargs)
                 finally:
                     current_tracer_var.reset(token)
             return sync_wrapper
     return decorator
+
+
+def _dispatch_span_logging(ctx: SpanContext, use_async: bool, token):
+    """Dispatches logging (sync or async) and resets the span context."""
+    try:
+        if use_async:
+            _background_executor.submit(_perform_background_logging, ctx)
+        else:
+            _perform_background_logging(ctx)
+    except Exception as log_e:
+        logger.error(f"Error dispatching log for {ctx.func.__name__}: {log_e}")
+    finally:
+        current_span_id_var.reset(token)
 
 
 def trace_span(
@@ -373,7 +382,6 @@ def trace_span(
 ) -> Callable:
     def decorator(func: Callable) -> Callable:
 
-        # Helper to decide execution mode
         def should_use_async(tracer):
             return tracer.settings.ASYNC_LOGGING and not force_sync
 
@@ -381,7 +389,7 @@ def trace_span(
             @wraps(func)
             async def async_wrapper(*args, **kwargs):
                 tracer = current_tracer_var.get()
-                if not tracer:
+                if tracer is None:
                     return await func(*args, **kwargs)
 
                 parent_span_id = current_span_id_var.get()
@@ -406,25 +414,16 @@ def trace_span(
                         tracer.alert_sent = True
                     raise e
                 finally:
-                    # Logging Logic (Sync or Async)
-                    try:
-                        if should_use_async(tracer):
-                            _background_executor.submit(
-                                _perform_background_logging,
-                                tracer, func, start_time, status, error_msg, error_code,
-                                my_span_id, parent_span_id, capture_return_value, result,
-                                attributes_to_capture, args, kwargs, exec_source
-                            )
-                        else:
-                            _perform_background_logging(
-                                tracer, func, start_time, status, error_msg, error_code,
-                                my_span_id, parent_span_id, capture_return_value, result,
-                                attributes_to_capture, args, kwargs, exec_source
-                            )
-                    except Exception as log_e:
-                        logger.error(f"Error dispatching log for {func.__name__}: {log_e}")
-
-                    current_span_id_var.reset(token)
+                    ctx = SpanContext(
+                        tracer=tracer, func=func, start_time=start_time,
+                        status=status, error_msg=error_msg, error_code=error_code,
+                        my_span_id=my_span_id, parent_span_id=parent_span_id,
+                        capture_return_value=capture_return_value, result=result,
+                        attributes_to_capture=attributes_to_capture,
+                        args=args, kwargs=kwargs.copy(),  # shallow copy guards against caller mutation
+                        exec_source=exec_source
+                    )
+                    _dispatch_span_logging(ctx, should_use_async(tracer), token)
                 return result
             return async_wrapper
 
@@ -432,7 +431,7 @@ def trace_span(
             @wraps(func)
             def sync_wrapper(*args, **kwargs):
                 tracer = current_tracer_var.get()
-                if not tracer:
+                if tracer is None:
                     return func(*args, **kwargs)
 
                 parent_span_id = current_span_id_var.get()
@@ -457,24 +456,16 @@ def trace_span(
                         tracer.alert_sent = True
                     raise e
                 finally:
-                    try:
-                        if should_use_async(tracer):
-                            _background_executor.submit(
-                                _perform_background_logging,
-                                tracer, func, start_time, status, error_msg, error_code,
-                                my_span_id, parent_span_id, capture_return_value, result,
-                                attributes_to_capture, args, kwargs, exec_source
-                            )
-                        else:
-                            _perform_background_logging(
-                                tracer, func, start_time, status, error_msg, error_code,
-                                my_span_id, parent_span_id, capture_return_value, result,
-                                attributes_to_capture, args, kwargs, exec_source
-                            )
-                    except Exception as log_e:
-                        logger.error(f"Error dispatching log for {func.__name__}: {log_e}")
-
-                    current_span_id_var.reset(token)
+                    ctx = SpanContext(
+                        tracer=tracer, func=func, start_time=start_time,
+                        status=status, error_msg=error_msg, error_code=error_code,
+                        my_span_id=my_span_id, parent_span_id=parent_span_id,
+                        capture_return_value=capture_return_value, result=result,
+                        attributes_to_capture=attributes_to_capture,
+                        args=args, kwargs=kwargs.copy(),  # shallow copy guards against caller mutation
+                        exec_source=exec_source
+                    )
+                    _dispatch_span_logging(ctx, should_use_async(tracer), token)
                 return result
             return sync_wrapper
 

@@ -2,6 +2,7 @@ import sys
 import os
 import time
 current_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(current_dir)
 src_path = os.path.abspath(os.path.join(current_dir, "../src"))
 
 if src_path not in sys.path:
@@ -72,7 +73,7 @@ def print_summary(result):
 if __name__ == "__main__":
     # Add the parent directory to the path to recognize the example.py path as a Python package
     # (Set the vectorwave folder as the package root)
-    project_root = os.path.abspath(os.path.join(current_dir, "../.."))
+    project_root = os.path.abspath(os.path.join(current_dir, ".."))
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 

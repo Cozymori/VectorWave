@@ -23,7 +23,7 @@ def create_smart_wrapper(original_func, root_wrapper):
         # Check for existing tracer at runtime
         tracer = current_tracer_var.get()
 
-        if tracer:
+        if tracer is not None:
             # [Case A] Parent trace exists -> Act as Child Span
             # (Wrap original function with trace_span and execute)
             return trace_span(original_func, capture_return_value=True)(*args, **kwargs)

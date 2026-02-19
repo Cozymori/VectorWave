@@ -4,8 +4,13 @@ import time
 
 # Set src path
 current_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(current_dir)
 src_path = os.path.join(os.path.dirname(current_dir), 'src')
 sys.path.insert(0, src_path)
+
+project_root = os.path.abspath(os.path.join(current_dir, ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from vectorwave import initialize_database, VectorWaveAutoInjector, generate_and_register_metadata
 

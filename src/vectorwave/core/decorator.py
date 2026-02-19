@@ -65,7 +65,7 @@ def vectorize(search_description: Optional[str] = None,
                 if attr not in final_attributes:
                     final_attributes.append(attr)
 
-        if capture_inputs:
+        if capture_inputs or replay:
             try:
                 sig = inspect.signature(func)
                 for param_name in sig.parameters:
@@ -73,15 +73,6 @@ def vectorize(search_description: Optional[str] = None,
                         final_attributes.append(param_name)
             except Exception as e:
                 logger.warning(f"Failed to inspect signature for auto-capture in '{function_name}': {e}")
-
-        if replay:
-            try:
-                sig = inspect.signature(func)
-                for param_name in sig.parameters:
-                    if param_name not in ('self', 'cls') and param_name not in final_attributes:
-                        final_attributes.append(param_name)
-            except Exception as e:
-                logger.warning(f"Failed to inspect signature for replay auto-capture in '{function_name}': {e}")
 
         # Extract Execution Tags
         valid_execution_tags = {}
@@ -147,7 +138,7 @@ def vectorize(search_description: Optional[str] = None,
                     vectorizer = get_vectorizer()
                     vector_to_add = None
 
-                    if vectorizer and search_description:
+                    if vectorizer is not None and search_description:
                         try:
                             vector_to_add = vectorizer.embed(search_description)
                         except Exception as e:
@@ -185,12 +176,30 @@ def vectorize(search_description: Optional[str] = None,
 
         # --- Wrapper Logic ---
 
+        def _try_cache(args, kwargs):
+            """Check semantic cache. Returns cached result or None."""
+            if not semantic_cache:
+                return None
+            filters = resolve_semantic_filters(args, kwargs)
+            return _check_and_return_cached_result(
+                func, args, kwargs, function_name, cache_threshold,
+                is_async_func, filters=filters
+            )
+
+        def _build_full_kwargs(kwargs):
+            """Build kwargs with execution tags and metadata."""
+            full_kwargs = kwargs.copy()
+            full_kwargs.update(valid_execution_tags)
+            full_kwargs['function_uuid'] = func_uuid
+            full_kwargs['exec_source'] = execution_source_context.get()
+            return full_kwargs
+
         if is_async_func:
             @trace_root()
             @trace_span(
                 attributes_to_capture=final_attributes,
                 capture_return_value=capture_return_value,
-                force_sync=semantic_cache  # Force sync if semantic cache is enabled
+                force_sync=semantic_cache
             )
             @wraps(func)
             async def inner_wrapper(*args, **kwargs):
@@ -200,16 +209,10 @@ def vectorize(search_description: Optional[str] = None,
 
             @wraps(func)
             async def outer_wrapper(*args, **kwargs):
-                if semantic_cache:
-                    filters = resolve_semantic_filters(args, kwargs)
-                    cached = _check_and_return_cached_result(func, args, kwargs, function_name, cache_threshold, True, filters=filters)
-                    if cached is not None: return cached
-
-                full_kwargs = kwargs.copy()
-                full_kwargs.update(valid_execution_tags)
-                full_kwargs['function_uuid'] = func_uuid
-                full_kwargs['exec_source'] = execution_source_context.get()
-                return await inner_wrapper(*args, **full_kwargs)
+                cached = _try_cache(args, kwargs)
+                if cached is not None:
+                    return cached
+                return await inner_wrapper(*args, **_build_full_kwargs(kwargs))
 
             outer_wrapper._is_vectorized = True
             return outer_wrapper
@@ -219,7 +222,7 @@ def vectorize(search_description: Optional[str] = None,
             @trace_span(
                 attributes_to_capture=final_attributes,
                 capture_return_value=capture_return_value,
-                force_sync=semantic_cache  # Force sync if semantic cache is enabled
+                force_sync=semantic_cache
             )
             @wraps(func)
             def inner_wrapper(*args, **kwargs):
@@ -229,16 +232,10 @@ def vectorize(search_description: Optional[str] = None,
 
             @wraps(func)
             def outer_wrapper(*args, **kwargs):
-                if semantic_cache:
-                    filters = resolve_semantic_filters(args, kwargs)
-                    cached = _check_and_return_cached_result(func, args, kwargs, function_name, cache_threshold, False, filters=filters)
-                    if cached is not None: return cached
-
-                full_kwargs = kwargs.copy()
-                full_kwargs.update(valid_execution_tags)
-                full_kwargs['function_uuid'] = func_uuid
-                full_kwargs['exec_source'] = execution_source_context.get()
-                return inner_wrapper(*args, **full_kwargs)
+                cached = _try_cache(args, kwargs)
+                if cached is not None:
+                    return cached
+                return inner_wrapper(*args, **_build_full_kwargs(kwargs))
 
             outer_wrapper._is_vectorized = True
             return outer_wrapper

@@ -177,7 +177,7 @@ def test_create_schema_creation_error(test_settings):
     with pytest.raises(SchemaCreationError) as exc_info:
         create_vectorwave_schema(mock_client, test_settings)
 
-    assert "Error during schema creation" in str(exc_info.value)
+    assert "Error creating collection" in str(exc_info.value)
     assert "Invalid OpenAI API Key" in str(exc_info.value)
 
 

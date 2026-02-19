@@ -3,10 +3,15 @@ import os
 import time
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(current_dir)
 src_path = os.path.abspath(os.path.join(current_dir, "../src"))
 
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
+
+project_root = os.path.abspath(os.path.join(current_dir, ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from vectorwave.utils.replayer_semantic import SemanticReplayer
 
