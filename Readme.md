@@ -1,3 +1,6 @@
+
+![VectorWave Logo](./docs_kr/images/vectorwave.png)
+
 Need more information? Visit [here](https://www.cozymori.net/vectorwave)
 
 # VectorWave
