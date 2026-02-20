@@ -1,7 +1,7 @@
 import json
 import logging
 import math
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ..core.llm.factory import get_llm_client
 from .replayer import VectorWaveReplayer
@@ -25,7 +25,8 @@ class SemanticReplayer(VectorWaveReplayer):
                limit: int = 10,
                update_baseline: bool = False,
                similarity_threshold: Optional[float] = None,
-               semantic_eval: bool = False
+               semantic_eval: bool = False,
+               mocks: Optional[Dict[str, Any]] = None
                ) -> Dict[str, Any]:
         """
         Retrieves past execution history (Golden > Standard), re-executes it,
@@ -47,7 +48,7 @@ class SemanticReplayer(VectorWaveReplayer):
             )
             return is_match, reason, ({"reason": reason} if not is_match else {})
 
-        return self._run_replay_loop(target_func, test_objects, results, update_baseline, compare_fn)
+        return self._run_replay_loop(target_func, test_objects, results, update_baseline, compare_fn, mocks=mocks)
 
     def _compare_results_semantic(self, expected: Any, actual: Any,
                                   similarity_threshold: Optional[float],

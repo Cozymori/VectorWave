@@ -1,3 +1,4 @@
+import contextlib
 import importlib
 import json
 import logging
@@ -7,6 +8,7 @@ import asyncio
 import difflib
 import pprint
 from typing import Any, Dict, List, Optional
+from unittest.mock import patch
 
 import weaviate.classes.query as wvc_query
 
@@ -34,7 +36,8 @@ class VectorWaveReplayer:
     def replay(self,
                function_full_name: str,
                limit: int = 10,
-               update_baseline: bool = False) -> Dict[str, Any]:
+               update_baseline: bool = False,
+               mocks: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Retrieves past execution history (Golden Data First -> Standard Logs),
         re-executes the function, and validates the result.
@@ -46,7 +49,8 @@ class VectorWaveReplayer:
         logger.info(f"Starting Replay: {len(test_objects)} logs for '{function_full_name}'")
         return self._run_replay_loop(
             target_func, test_objects, results, update_baseline,
-            compare_fn=lambda exp, act: (self._compare_results(exp, act), None, {})
+            compare_fn=lambda exp, act: (self._compare_results(exp, act), None, {}),
+            mocks=mocks
         )
 
     def _load_and_fetch(self, function_full_name: str, limit: int):
@@ -75,7 +79,8 @@ class VectorWaveReplayer:
             test_objects: List[Dict[str, Any]],
             results: Dict[str, Any],
             update_baseline: bool,
-            compare_fn
+            compare_fn,
+            mocks: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Core replay loop. compare_fn(expected, actual) -> (is_match, reason, extra_failure_fields).
@@ -94,10 +99,24 @@ class VectorWaveReplayer:
             token = None
             try:
                 token = execution_source_context.set("REPLAY")
-                if is_async_func:
-                    actual_output = asyncio.run(target_func(**inputs))
-                else:
-                    actual_output = target_func(**inputs)
+                with contextlib.ExitStack() as stack:
+                    if mocks:
+                        for target, behavior in mocks.items():
+                            mock_obj = stack.enter_context(patch(target))
+                            if isinstance(behavior, dict):
+                                if "side_effect" in behavior:
+                                    mock_obj.side_effect = behavior["side_effect"]
+                                elif "return_value" in behavior:
+                                    mock_obj.return_value = behavior["return_value"]
+                                else:
+                                    mock_obj.return_value = behavior
+                            else:
+                                mock_obj.return_value = behavior
+
+                    if is_async_func:
+                        actual_output = asyncio.run(target_func(**inputs))
+                    else:
+                        actual_output = target_func(**inputs)
 
                 is_match, reason, extra_fields = compare_fn(expected_output, actual_output)
 
