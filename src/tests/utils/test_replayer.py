@@ -6,6 +6,17 @@ from unittest.mock import MagicMock, patch
 from vectorwave.utils.replayer import VectorWaveReplayer
 from vectorwave.models.db_config import WeaviateSettings
 
+
+# --- Module-level helpers for mock injection tests ---
+
+def _external_service(value):
+    raise RuntimeError("Real _external_service must not be called in tests")
+
+
+def _func_calling_external(x):
+    return _external_service(x)
+
+
 # --- 1. Mock Fixtures (Mock Environment Setup) ---
 
 @pytest.fixture
@@ -245,3 +256,35 @@ def test_replay_fetches_golden_first(mock_replayer_deps_v2):
     mock_replayer_deps_v2["golden_col"].query.fetch_objects.assert_called_once()
     # Verify that fetch_object_by_id was called to retrieve the original log
     mock_replayer_deps_v2["exec_col"].query.fetch_object_by_id.assert_called_with("orig-1")
+
+
+def test_replay_with_mocks_return_value(mock_replayer_deps):
+    """[Case 7] mocks return_value: _external_service patched to return 42"""
+    replayer = VectorWaveReplayer()
+    mock_logs = [create_mock_log("uuid-mock-1", {"x": 10}, 42)]
+    mock_replayer_deps["query"].fetch_objects.return_value.objects = mock_logs
+
+    result = replayer.replay(
+        "tests.utils.test_replayer._func_calling_external",
+        limit=1,
+        mocks={"tests.utils.test_replayer._external_service": {"return_value": 42}}
+    )
+
+    assert result["passed"] == 1
+    assert result["failed"] == 0
+
+
+def test_replay_with_mocks_side_effect(mock_replayer_deps):
+    """[Case 8] mocks side_effect: _external_service patched with lambda v: v * 2"""
+    replayer = VectorWaveReplayer()
+    mock_logs = [create_mock_log("uuid-mock-2", {"x": 7}, 14)]
+    mock_replayer_deps["query"].fetch_objects.return_value.objects = mock_logs
+
+    result = replayer.replay(
+        "tests.utils.test_replayer._func_calling_external",
+        limit=1,
+        mocks={"tests.utils.test_replayer._external_service": {"side_effect": lambda v: v * 2}}
+    )
+
+    assert result["passed"] == 1
+    assert result["failed"] == 0
