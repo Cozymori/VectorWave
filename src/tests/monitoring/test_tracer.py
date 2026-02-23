@@ -351,3 +351,73 @@ def test_trace_span_error_code_priority_3_default_class_name(mock_tracer_deps):
     assert kwargs["properties"]["status"] == "ERROR"
     assert kwargs["properties"]["error_code"] == "KeyError"
     assert kwargs["properties"]["parent_span_id"] == "mock-parent-id-456"
+
+
+def test_enable_alert_false_suppresses_error_alert(mock_tracer_deps):
+    """
+    enable_alert=False: alerter.notify() must NOT be called on failure,
+    but the span must still be logged to the DB.
+    """
+    mock_batch = mock_tracer_deps["batch"].add_object
+    mock_alerter = mock_tracer_deps["alerter"]
+
+    @trace_span  # Child (Failing, alerts enabled — default)
+    def critical_span():
+        raise ValueError("critical error")
+
+    @trace_span(enable_alert=False)  # Child (Failing, alerts disabled)
+    def silent_span():
+        raise RuntimeError("silent error")
+
+    @trace_root()
+    @trace_span
+    def my_workflow():
+        try:
+            critical_span()
+        except ValueError:
+            pass
+        try:
+            silent_span()
+        except RuntimeError:
+            pass
+
+    my_workflow()
+
+    # 3 DB writes: my_workflow (SUCCESS) + critical_span (ERROR) + silent_span (ERROR)
+    assert mock_batch.call_count == 3
+
+    props_map = {
+        call.kwargs["properties"]["function_name"]: call.kwargs["properties"]
+        for call in mock_batch.call_args_list
+    }
+
+    assert props_map["critical_span"]["status"] == "ERROR"
+    assert props_map["silent_span"]["status"] == "ERROR"
+
+    # Only critical_span should have triggered an alert
+    mock_alerter.notify.assert_called_once()
+    alert_props = mock_alerter.notify.call_args.args[0]
+    assert alert_props["function_name"] == "critical_span"
+
+
+def test_enable_alert_false_default_is_true(mock_tracer_deps):
+    """
+    enable_alert defaults to True: existing behavior is unchanged.
+    """
+    mock_alerter = mock_tracer_deps["alerter"]
+
+    @trace_span  # No enable_alert specified → defaults to True
+    def failing_span():
+        raise ValueError("default alert behavior")
+
+    @trace_root()
+    @trace_span
+    def my_workflow():
+        try:
+            failing_span()
+        except ValueError:
+            pass
+
+    my_workflow()
+
+    mock_alerter.notify.assert_called_once()
