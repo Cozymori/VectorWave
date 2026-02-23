@@ -57,6 +57,7 @@ class SpanContext:
     args: tuple
     kwargs: Dict[str, Any]  # shallow-copied at creation to avoid race conditions
     exec_source: Optional[str]
+    enable_alert: bool = True
 
 
 @lru_cache(maxsize=2048)
@@ -275,7 +276,7 @@ def _perform_background_logging(ctx: SpanContext):
         )
 
         # 6. Alerting (If Failure)
-        if ctx.status != "SUCCESS":
+        if ctx.status != "SUCCESS" and ctx.enable_alert:
             try:
                 if not ctx.tracer.alert_sent:
                     ctx.tracer.alerter.notify(span_properties)
@@ -299,7 +300,8 @@ def _perform_background_logging(ctx: SpanContext):
                         f"Anomaly detected.\nDistance: {dist:.4f} "
                         f"(Threshold: {ctx.tracer.settings.DRIFT_DISTANCE_THRESHOLD})\nNearest: {nearest_id}"
                     )
-                    ctx.tracer.alerter.notify(drift_alert_props)
+                    if ctx.enable_alert:
+                        ctx.tracer.alerter.notify(drift_alert_props)
 
                     span_properties["status"] = "ANOMALY"
                     span_properties["error_code"] = "SEMANTIC_DRIFT"
@@ -378,7 +380,8 @@ def trace_span(
         *,
         attributes_to_capture: Optional[List[str]] = None,
         capture_return_value: bool = False,
-        force_sync: bool = False
+        force_sync: bool = False,
+        enable_alert: bool = True
 ) -> Callable:
     def decorator(func: Callable) -> Callable:
 
@@ -421,7 +424,8 @@ def trace_span(
                         capture_return_value=capture_return_value, result=result,
                         attributes_to_capture=attributes_to_capture,
                         args=args, kwargs=kwargs.copy(),  # shallow copy guards against caller mutation
-                        exec_source=exec_source
+                        exec_source=exec_source,
+                        enable_alert=enable_alert
                     )
                     _dispatch_span_logging(ctx, should_use_async(tracer), token)
                 return result
@@ -463,7 +467,8 @@ def trace_span(
                         capture_return_value=capture_return_value, result=result,
                         attributes_to_capture=attributes_to_capture,
                         args=args, kwargs=kwargs.copy(),  # shallow copy guards against caller mutation
-                        exec_source=exec_source
+                        exec_source=exec_source,
+                        enable_alert=enable_alert
                     )
                     _dispatch_span_logging(ctx, should_use_async(tracer), token)
                 return result

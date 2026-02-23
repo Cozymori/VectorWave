@@ -31,6 +31,7 @@ def vectorize(search_description: Optional[str] = None,
               capture_inputs: bool = False,
               semantic_cache_filters: Optional[Dict[str, Any]] = None,
               semantic_cache_scope: Optional[List[str]] = None,
+              enable_alert: bool = True,
               **execution_tags):
     """
     VectorWave Decorator with Auto-Generation support.
@@ -199,7 +200,8 @@ def vectorize(search_description: Optional[str] = None,
             @trace_span(
                 attributes_to_capture=final_attributes,
                 capture_return_value=capture_return_value,
-                force_sync=semantic_cache
+                force_sync=semantic_cache,
+                enable_alert=enable_alert
             )
             @wraps(func)
             async def inner_wrapper(*args, **kwargs):
@@ -222,7 +224,8 @@ def vectorize(search_description: Optional[str] = None,
             @trace_span(
                 attributes_to_capture=final_attributes,
                 capture_return_value=capture_return_value,
-                force_sync=semantic_cache
+                force_sync=semantic_cache,
+                enable_alert=enable_alert
             )
             @wraps(func)
             def inner_wrapper(*args, **kwargs):
