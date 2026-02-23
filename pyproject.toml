@@ -5,7 +5,7 @@ build-backend = "maturin"
 
 [project]
 name = "vectorwave"
-version = "0.2.09"
+version = "0.3.0"
 authors = [
     { name = "junyeonggim", email = "junyeonggim5@gmail.com" },
 ]
