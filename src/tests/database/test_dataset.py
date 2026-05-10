@@ -1,97 +1,166 @@
 import pytest
-from unittest.mock import MagicMock, patch
-import math
+from datetime import datetime, timezone
+
 from vectorwave.database.dataset import VectorWaveDatasetManager
+from vectorwave.database.db import (
+    get_weaviate_client,
+    create_execution_schema,
+    create_golden_dataset_schema,
+)
 from vectorwave.models.db_config import WeaviateSettings
 
+
 @pytest.fixture
-def mock_dataset_deps(monkeypatch):
-    """Mocking dependencies for DatasetManager tests"""
-    # 1. Settings Mock
-    mock_settings = WeaviateSettings(
-        EXECUTION_COLLECTION_NAME="Executions",
-        GOLDEN_COLLECTION_NAME="GoldenData",
-        RECOMMENDATION_STEADY_MARGIN=0.1,
-        RECOMMENDATION_DISCOVERY_MARGIN=0.2
+def e2e_settings() -> WeaviateSettings:
+    s = WeaviateSettings()
+    s.IS_VECTORIZE_COLLECTION_NAME = False
+    s.VECTORIZER = "none"
+    return s
+
+
+def _seed_execution(coll, *, function_name: str, return_value: str, vector, status="SUCCESS", uuid=None):
+    """Insert one execution log with an explicit vector. Returns the assigned uuid (str)."""
+    return coll.data.insert(
+        properties={
+            "function_name": function_name,
+            "function_uuid": "00000000-0000-0000-0000-000000000001",
+            "return_value": return_value,
+            "status": status,
+            "duration_ms": 10,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        },
+        vector=vector,
+        uuid=uuid,
     )
-    mock_get_settings = MagicMock(return_value=mock_settings)
 
-    # 2. Client & Collections Mock
-    mock_client = MagicMock()
-    mock_exec_col = MagicMock()
-    mock_golden_col = MagicMock()
 
-    def get_collection_side_effect(name):
-        if name == "Executions": return mock_exec_col
-        if name == "GoldenData": return mock_golden_col
-        return MagicMock()
+@pytest.mark.e2e
+def test_register_as_golden_copies_vector_and_properties(clean_weaviate, e2e_settings):
+    """register_as_golden fetches the source log, copies its vector, and inserts into golden."""
+    client = get_weaviate_client()
+    try:
+        create_execution_schema(client, e2e_settings)
+        create_golden_dataset_schema(client, e2e_settings)
+        exec_col = client.collections.get(e2e_settings.EXECUTION_COLLECTION_NAME)
+        golden_col = client.collections.get(e2e_settings.GOLDEN_COLLECTION_NAME)
 
-    mock_client.collections.get.side_effect = get_collection_side_effect
-    mock_get_client = MagicMock(return_value=mock_client)
+        log_uuid = str(_seed_execution(
+            exec_col, function_name="calc", return_value="42", vector=[0.1, 0.2, 0.3]
+        ))
 
-    # 3. Patching
-    monkeypatch.setattr("vectorwave.database.dataset.get_cached_client", mock_get_client)
-    monkeypatch.setattr("vectorwave.database.dataset.get_weaviate_settings", mock_get_settings)
+        manager = VectorWaveDatasetManager()
+        assert manager.register_as_golden(log_uuid, note="Best case", tags=["benchmark"]) is True
 
-    return {
-        "exec_col": mock_exec_col,
-        "golden_col": mock_golden_col,
-        "settings": mock_settings
-    }
+        golden_objs = list(golden_col.iterator(include_vector=True))
+        assert len(golden_objs) == 1
+        g = golden_objs[0]
+        assert g.properties["original_uuid"] == log_uuid
+        assert g.properties["function_name"] == "calc"
+        assert g.properties["return_value"] == "42"
+        assert g.properties["note"] == "Best case"
+        assert g.properties["tags"] == ["benchmark"]
+        assert g.vector["default"] == pytest.approx([0.1, 0.2, 0.3])
+    finally:
+        client.close()
 
-def create_mock_obj(uuid_str, props=None, vector=None):
-    obj = MagicMock()
-    obj.uuid = uuid_str
-    obj.properties = props or {}
-    if vector:
-        obj.vector = {"default": vector}
-    return obj
 
-def test_register_as_golden_success(mock_dataset_deps):
-    """[Case 1] Test successful Golden Data registration"""
-    manager = VectorWaveDatasetManager()
+@pytest.mark.e2e
+def test_register_as_golden_fails_for_missing_log(clean_weaviate, e2e_settings):
+    client = get_weaviate_client()
+    try:
+        create_execution_schema(client, e2e_settings)
+        create_golden_dataset_schema(client, e2e_settings)
 
-    # Arrange: Simulate successful retrieval of original log
-    mock_log = create_mock_obj("log-uuid-1", {"function_name": "test_func", "return_value": "res"}, vector=[0.1, 0.2])
-    mock_dataset_deps["exec_col"].query.fetch_object_by_id.return_value = mock_log
+        manager = VectorWaveDatasetManager()
+        assert manager.register_as_golden("00000000-0000-0000-0000-000000000999") is False
+    finally:
+        client.close()
 
-    # Act
-    result = manager.register_as_golden("log-uuid-1", note="Best case")
 
-    # Assert
-    assert result is True
-    # Verify if insert was called on Golden Collection
-    mock_dataset_deps["golden_col"].data.insert.assert_called_once()
-    call_kwargs = mock_dataset_deps["golden_col"].data.insert.call_args.kwargs
-    assert call_kwargs["properties"]["original_uuid"] == "log-uuid-1"
-    assert call_kwargs["properties"]["note"] == "Best case"
-    assert call_kwargs["vector"] == [0.1, 0.2] # Check if vector was copied
+@pytest.mark.e2e
+def test_register_as_golden_fails_when_log_has_no_vector(clean_weaviate, e2e_settings):
+    """A log inserted without a vector cannot be promoted (capture_return_value missing)."""
+    client = get_weaviate_client()
+    try:
+        create_execution_schema(client, e2e_settings)
+        create_golden_dataset_schema(client, e2e_settings)
+        exec_col = client.collections.get(e2e_settings.EXECUTION_COLLECTION_NAME)
 
-def test_recommend_candidates_logic(mock_dataset_deps):
-    """[Case 2] Test density-based recommendation logic (Steady/Discovery)"""
-    manager = VectorWaveDatasetManager()
+        log_uuid = str(exec_col.data.insert(
+            properties={
+                "function_name": "calc",
+                "function_uuid": "00000000-0000-0000-0000-000000000001",
+                "return_value": "42",
+                "status": "SUCCESS",
+                "duration_ms": 10,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            },
+        ))
 
-    # Arrange 1: Golden Data (Set reference point)
-    # Centroid: [1.0, 1.0], Avg Dist: 0.0 (Assuming all points are identical)
-    golden_vec = [1.0, 1.0]
-    golden_objs = [create_mock_obj("gold-1", {"original_uuid": "origin-1"}, golden_vec)]
-    mock_dataset_deps["golden_col"].query.fetch_objects.return_value.objects = golden_objs
+        manager = VectorWaveDatasetManager()
+        assert manager.register_as_golden(log_uuid) is False
+    finally:
+        client.close()
 
-    # Cand A: [1.05, 1.05] -> Dist ≈ 0.07 (Steady Range: <= 0.1)
-    # Cand B: [1.2, 1.2]   -> Dist ≈ 0.28 (Discovery Range: 0.1 < d <= 0.3)
-    # Cand C: [2.0, 2.0]   -> Dist ≈ 1.41 (Ignore Range: > 0.3)
-    cand_a = create_mock_obj("cand-a", {"return_value": "A"}, [1.05, 1.05])
-    cand_b = create_mock_obj("cand-b", {"return_value": "B"}, [1.2, 1.2])
-    cand_c = create_mock_obj("cand-c", {"return_value": "C"}, [2.0, 2.0])
 
-    mock_dataset_deps["exec_col"].query.near_vector.return_value.objects = [cand_a, cand_b, cand_c]
+@pytest.mark.e2e
+def test_recommend_candidates_classifies_steady_and_discovery(clean_weaviate, e2e_settings, monkeypatch):
+    """Centroid math: candidates near the golden centroid are STEADY, slightly farther are DISCOVERY,
+    far ones are dropped.
+    """
+    from vectorwave.models.db_config import get_weaviate_settings
+    monkeypatch.setenv("RECOMMENDATION_STEADY_MARGIN", "0.1")
+    monkeypatch.setenv("RECOMMENDATION_DISCOVERY_MARGIN", "0.2")
+    get_weaviate_settings.cache_clear()
 
-    # Act
-    recommendations = manager.recommend_candidates("test_func")
+    client = get_weaviate_client()
+    try:
+        create_execution_schema(client, e2e_settings)
+        create_golden_dataset_schema(client, e2e_settings)
+        exec_col = client.collections.get(e2e_settings.EXECUTION_COLLECTION_NAME)
+        golden_col = client.collections.get(e2e_settings.GOLDEN_COLLECTION_NAME)
 
-    # Assert
-    assert len(recommendations) == 2
-    assert recommendations[0]["uuid"] == "cand-a"
-    assert recommendations[0]["type"] == "STEADY"
-    assert recommendations[1]["uuid"] == "cand-b"
-    assert recommendations[1]["type"] == "DISCOVERY"
+        # Single golden point at [1,1] -> centroid=[1,1], avg_dist=0
+        golden_col.data.insert(
+            properties={
+                "original_uuid": "origin-1",
+                "function_name": "test_func",
+                "return_value": "g",
+                "note": "",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "tags": [],
+            },
+            vector=[1.0, 1.0],
+        )
+
+        # Three candidates with controlled distances to the centroid
+        # cand_a: dist ≈ 0.071 (within steady_limit=0.1) -> STEADY
+        # cand_b: dist ≈ 0.283 (within discovery_limit=0.3, > 0.1) -> DISCOVERY
+        # cand_c: dist ≈ 1.414 (> discovery_limit) -> dropped
+        _seed_execution(exec_col, function_name="test_func", return_value="A", vector=[1.05, 1.05])
+        _seed_execution(exec_col, function_name="test_func", return_value="B", vector=[1.2, 1.2])
+        _seed_execution(exec_col, function_name="test_func", return_value="C", vector=[2.0, 2.0])
+
+        manager = VectorWaveDatasetManager()
+        recs = manager.recommend_candidates("test_func")
+
+        assert len(recs) == 2
+        types = {r["return_value"]: r["type"] for r in recs}
+        assert types["A"] == "STEADY"
+        assert types["B"] == "DISCOVERY"
+        assert "C" not in types
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+def test_recommend_candidates_returns_empty_when_no_golden(clean_weaviate, e2e_settings):
+    client = get_weaviate_client()
+    try:
+        create_execution_schema(client, e2e_settings)
+        create_golden_dataset_schema(client, e2e_settings)
+
+        manager = VectorWaveDatasetManager()
+        assert manager.recommend_candidates("nonexistent") == []
+    finally:
+        client.close()

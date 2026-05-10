@@ -1,232 +1,204 @@
-import pytest
 import json
-import uuid
-from unittest.mock import MagicMock, patch, mock_open
-from vectorwave.database.archiver import VectorWaveArchiver
-from vectorwave.models.db_config import WeaviateSettings
-from weaviate.classes.query import Filter as wvc_filter # Import Filter explicitly
+import pytest
+from datetime import datetime, timezone
+from uuid import uuid4
 
-# --- Mock Fixtures ---
+from vectorwave.database.archiver import VectorWaveArchiver
+from vectorwave.database.db import get_weaviate_client, create_execution_schema
+from vectorwave.models.db_config import WeaviateSettings
+
 
 @pytest.fixture
-def mock_archiver_deps(monkeypatch):
-    """
-    Mocks the dependencies (DB client, settings) for Archiver testing.
-    """
-    # 1. Mock Settings
-    mock_settings = WeaviateSettings(EXECUTION_COLLECTION_NAME="TestExecutions")
-    mock_get_settings = MagicMock(return_value=mock_settings)
-
-    # 2. Mock Weaviate Client & Collection
-    mock_client = MagicMock()
-    mock_collection = MagicMock()
-
-    # Set up the fake response object for query.fetch_objects() to return
-    mock_query = MagicMock()
-    mock_collection.query = mock_query
-
-    # Set up the fake result object for data.delete_many() to return
-    mock_data = MagicMock()
-    mock_delete_result = MagicMock()
-    mock_delete_result.successful = 5  # Assume 5 successful deletions
-    mock_data.delete_many.return_value = mock_delete_result
-    mock_collection.data = mock_data
-
-    mock_client.collections.get.return_value = mock_collection
-    mock_get_client = MagicMock(return_value=mock_client)
-
-    # 3. Apply Monkeypatch
-    monkeypatch.setattr("vectorwave.database.archiver.get_cached_client", mock_get_client)
-    monkeypatch.setattr("vectorwave.database.archiver.get_weaviate_settings", mock_get_settings)
-
-    return {
-        "client": mock_client,
-        "collection": mock_collection,
-        "query": mock_query,
-        "data": mock_data,
-        "settings": mock_settings
-    }
-
-def create_mock_object(uuid_str, props):
-    """Helper function to mimic a Weaviate Object"""
-    mock_obj = MagicMock()
-    mock_obj.uuid = uuid_str
-    mock_obj.properties = props
-    return mock_obj
+def e2e_settings() -> WeaviateSettings:
+    s = WeaviateSettings()
+    s.IS_VECTORIZE_COLLECTION_NAME = False
+    s.VECTORIZER = "none"
+    return s
 
 
-# --- Test Cases ---
-
-def test_export_and_clear_success(mock_archiver_deps):
-    """
-    Case 1: [Export + Clear] Normal operation test
-    - Verify successful file saving
-    - Verify DB deletion call
-    """
-    # Arrange
-    valid_uuid_1 = str(uuid.uuid4())
-    valid_uuid_2 = str(uuid.uuid4())
-
-    mock_objects = [
-        create_mock_object(valid_uuid_1, {"function_name": "test_func", "return_value": "res1", "status": "SUCCESS"}),
-        create_mock_object(valid_uuid_2, {"function_name": "test_func", "return_value": "res2", "status": "SUCCESS"})
-    ]
-    mock_archiver_deps["query"].fetch_objects.return_value = MagicMock(objects=mock_objects)
-
-    archiver = VectorWaveArchiver()
-
-    # Act
-    # Mocks os.makedirs and open to prevent actual file creation
-    with patch("os.makedirs") as mock_makedirs, \
-            patch("builtins.open", new_callable=mock_open) as mock_file:
-
-        result = archiver.export_and_clear(
-            function_name="test_func",
-            output_file="data/dataset.jsonl",
-            clear_after_export=True,  # <--- Request deletion after Export
-            delete_only=False
-        )
-
-    # Assert
-    # 1. Check result return value
-    assert result["exported"] == 2
-    assert result["deleted"] == 5  # Mocked value
-
-    # 2. Verify file writing (called 2 times)
-    assert mock_file.call_count == 1  # open() call count
-    handle = mock_file()
-    assert handle.write.call_count == 2 # write() call count (2 data records)
-
-    # 3. Verify DB deletion call (delete_many was called)
-    mock_archiver_deps["data"].delete_many.assert_called_once()
-
-    # 4. Verify directory creation
-    mock_makedirs.assert_called_with("data", exist_ok=True)
-
-
-def test_export_only_no_delete(mock_archiver_deps):
-    """
-    Case 2: [Export Only] Only exports and does not delete
-    """
-    # Arrange
-    valid_uuid = str(uuid.uuid4())
-    mock_objects = [create_mock_object(valid_uuid, {"val": 1})]
-    mock_archiver_deps["query"].fetch_objects.return_value = MagicMock(objects=mock_objects)
-
-    archiver = VectorWaveArchiver()
-
-    # Act
-    with patch("os.makedirs"), patch("builtins.open", new_callable=mock_open):
-        result = archiver.export_and_clear(
-            function_name="test_func",
-            output_file="backup.jsonl",
-            clear_after_export=False, # <--- No deletion
-            delete_only=False
-        )
-
-    # Assert
-    assert result["exported"] == 1
-    assert result["deleted"] == 0
-
-    # DB deletion method should not be called
-    mock_archiver_deps["data"].delete_many.assert_not_called()
-
-
-def test_delete_only_no_export(mock_archiver_deps):
-    """
-    Case 3: [Delete Only] Performs only deletion without saving file (Purge)
-    """
-    # Arrange
-    valid_uuid = str(uuid.uuid4())
-    mock_objects = [create_mock_object(valid_uuid, {"val": 2})]
-    mock_archiver_deps["query"].fetch_objects.return_value = MagicMock(objects=mock_objects)
-
-    archiver = VectorWaveArchiver()
-
-    # Act
-    with patch("builtins.open", new_callable=mock_open) as mock_file:
-        result = archiver.export_and_clear(
-            function_name="test_func",
-            output_file="",
-            clear_after_export=False,
-            delete_only=True  # <--- Delete-only mode
-        )
-
-    # Assert
-    assert result["exported"] == 0
-    assert result["deleted"] == 5
-
-    # File should not be opened
-    mock_file.assert_not_called()
-    # DB deletion should be called
-    mock_archiver_deps["data"].delete_many.assert_called_once()
-
-
-def test_safety_check_file_write_error_prevents_delete(mock_archiver_deps):
-    """
-    Case 4: [Safety] If an error occurs during file saving, DB deletion must be prevented
-    """
-    # Arrange
-    valid_uuid = str(uuid.uuid4())
-    mock_objects = [create_mock_object(valid_uuid, {"data": "ok"})]
-    mock_archiver_deps["query"].fetch_objects.return_value = MagicMock(objects=mock_objects)
-
-    archiver = VectorWaveArchiver()
-
-    # Act
-    # Induce IOError when open() is called
-    with patch("os.makedirs"), \
-            patch("builtins.open", side_effect=IOError("Disk Full")):
-
-        result = archiver.export_and_clear(
-            function_name="test_func",
-            output_file="crash.jsonl",
-            clear_after_export=True,  # <--- Deletion requested, but
-            delete_only=False
-        )
-
-    # Assert
-    # 1. Check result
-    assert result["exported"] == 0
-    assert result["deleted"] == 0
-
-    # 2. CRITICAL: DB deletion must never be called
-    mock_archiver_deps["data"].delete_many.assert_not_called()
-
-
-def test_convert_to_training_format_logic(mock_archiver_deps):
-    """
-    Case 5: Test data format conversion logic (JSONL format)
-    """
-    archiver = VectorWaveArchiver()
-
-    # Mock Object Properties
-    valid_uuid = str(uuid.uuid4())
+def _seed(coll, *, function_name, return_value, status="SUCCESS", input_payload=None):
     props = {
-        "function_name": "calc",
-        "status": "SUCCESS",
-        "input_a": 10,       # Input value
-        "input_b": 20,       # Input value
-        "return_value": 30,  # Output value
-        "duration_ms": 100,  # Value to be excluded
-        "uuid": valid_uuid   # Value to be excluded (assuming inclusion in properties)
+        "function_uuid": str(uuid4()),
+        "function_name": function_name,
+        "return_value": return_value,
+        "status": status,
+        "duration_ms": 10,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
-    mock_obj = create_mock_object(valid_uuid, props)
+    if input_payload:
+        props.update(input_payload)
+    return coll.data.insert(properties=props)
 
-    # Act
-    formatted = archiver._convert_to_training_format(mock_obj)
 
-    # Assert
-    assert "messages" in formatted
+def _read_jsonl(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Unit test — pure JSONL conversion, no DB needed
+# ---------------------------------------------------------------------------
+
+def test_convert_to_training_format_excludes_metadata_keys():
+    """`_convert_to_training_format` filters out internal fields and serializes inputs."""
+    from types import SimpleNamespace
+
+    obj = SimpleNamespace(
+        uuid=uuid4(),
+        properties={
+            "function_name": "calc",
+            "status": "SUCCESS",
+            "input_a": 10,
+            "input_b": 20,
+            "return_value": 30,
+            "duration_ms": 100,
+        },
+    )
+    formatted = VectorWaveArchiver.__new__(VectorWaveArchiver)._convert_to_training_format(obj)
+
     messages = formatted["messages"]
     assert len(messages) == 2
-
-    # Verify User Message (Input) - checking excluded keys are missing
     user_content = json.loads(messages[0]["content"])
     assert user_content == {"input_a": 10, "input_b": 20}
-    assert "status" not in user_content
-    assert "duration_ms" not in user_content
-    assert "uuid" not in user_content
-
-    # Verify Assistant Message (Output)
     assert messages[1]["content"] == "30"
+
+
+# ---------------------------------------------------------------------------
+# E2E — real Weaviate, real file IO
+# ---------------------------------------------------------------------------
+
+@pytest.mark.e2e
+def test_export_writes_jsonl_and_clears_when_requested(clean_weaviate, e2e_settings, tmp_path):
+    """export_and_clear with clear_after_export=True writes JSONL and removes the rows."""
+    client = get_weaviate_client()
+    try:
+        create_execution_schema(client, e2e_settings)
+        coll = client.collections.get(e2e_settings.EXECUTION_COLLECTION_NAME)
+        _seed(coll, function_name="test_func", return_value="r1")
+        _seed(coll, function_name="test_func", return_value="r2")
+
+        out = tmp_path / "exports" / "dataset.jsonl"
+        archiver = VectorWaveArchiver()
+        result = archiver.export_and_clear(
+            function_name="test_func",
+            output_file=str(out),
+            clear_after_export=True,
+        )
+
+        assert result["exported"] == 2
+        assert result["deleted"] == 2
+
+        rows = _read_jsonl(out)
+        assert len(rows) == 2
+        assert all("messages" in r for r in rows)
+
+        remaining = coll.query.fetch_objects(limit=10).objects
+        assert len(remaining) == 0
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+def test_export_only_does_not_delete(clean_weaviate, e2e_settings, tmp_path):
+    client = get_weaviate_client()
+    try:
+        create_execution_schema(client, e2e_settings)
+        coll = client.collections.get(e2e_settings.EXECUTION_COLLECTION_NAME)
+        _seed(coll, function_name="keep_me", return_value="r1")
+
+        out = tmp_path / "backup.jsonl"
+        archiver = VectorWaveArchiver()
+        result = archiver.export_and_clear(
+            function_name="keep_me",
+            output_file=str(out),
+            clear_after_export=False,
+        )
+
+        assert result["exported"] == 1
+        assert result["deleted"] == 0
+        assert len(coll.query.fetch_objects(limit=10).objects) == 1
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+def test_delete_only_skips_file_and_purges(clean_weaviate, e2e_settings, tmp_path):
+    """delete_only mode purges all matching rows including non-SUCCESS ones."""
+    client = get_weaviate_client()
+    try:
+        create_execution_schema(client, e2e_settings)
+        coll = client.collections.get(e2e_settings.EXECUTION_COLLECTION_NAME)
+        _seed(coll, function_name="purge_me", return_value="ok", status="SUCCESS")
+        _seed(coll, function_name="purge_me", return_value="bad", status="FAILURE")
+
+        out = tmp_path / "should_not_be_created.jsonl"
+        archiver = VectorWaveArchiver()
+        result = archiver.export_and_clear(
+            function_name="purge_me",
+            output_file=str(out),
+            delete_only=True,
+        )
+
+        assert result["exported"] == 0
+        assert result["deleted"] == 2
+        assert not out.exists()
+        assert len(coll.query.fetch_objects(limit=10).objects) == 0
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+def test_file_write_failure_aborts_delete(clean_weaviate, e2e_settings, monkeypatch):
+    """If file write fails, no rows are deleted (safety invariant)."""
+    client = get_weaviate_client()
+    try:
+        create_execution_schema(client, e2e_settings)
+        coll = client.collections.get(e2e_settings.EXECUTION_COLLECTION_NAME)
+        _seed(coll, function_name="safety", return_value="r1")
+
+        original_open = open
+
+        def failing_open(*args, **kwargs):
+            if args and args[0] and "safety_export.jsonl" in str(args[0]):
+                raise IOError("Disk Full")
+            return original_open(*args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", failing_open)
+
+        archiver = VectorWaveArchiver()
+        result = archiver.export_and_clear(
+            function_name="safety",
+            output_file="safety_export.jsonl",
+            clear_after_export=True,
+        )
+
+        assert result["exported"] == 0
+        assert result["deleted"] == 0
+        assert len(coll.query.fetch_objects(limit=10).objects) == 1
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+def test_export_only_includes_success_status(clean_weaviate, e2e_settings, tmp_path):
+    """Non-delete-only mode filters to status=SUCCESS rows for training export."""
+    client = get_weaviate_client()
+    try:
+        create_execution_schema(client, e2e_settings)
+        coll = client.collections.get(e2e_settings.EXECUTION_COLLECTION_NAME)
+        _seed(coll, function_name="mixed", return_value="ok1", status="SUCCESS")
+        _seed(coll, function_name="mixed", return_value="ok2", status="SUCCESS")
+        _seed(coll, function_name="mixed", return_value="bad", status="FAILURE")
+
+        out = tmp_path / "training.jsonl"
+        archiver = VectorWaveArchiver()
+        result = archiver.export_and_clear(
+            function_name="mixed",
+            output_file=str(out),
+        )
+
+        assert result["exported"] == 2
+        rows = _read_jsonl(out)
+        assert len(rows) == 2
+    finally:
+        client.close()
