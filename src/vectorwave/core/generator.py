@@ -18,11 +18,25 @@ except ImportError:
 
 
 def generate_metadata_via_llm(source_code: str, func_name: str) -> Optional[Dict[str, str]]:
-    """Call LLM to generate description and narrative from source code."""
+    """Call LLM to generate description and narrative from source code.
+
+    NOTE: this transmits the raw source of the wrapped function to the
+    configured LLM provider. If your function bodies may contain hardcoded
+    secrets, internal IP, or PII in docstrings, do not enable
+    `@vectorize(auto=True)` on them — the source is sent verbatim with no
+    masking applied.
+    """
     settings = get_weaviate_settings()
     client = get_llm_client()
     if client is None:
         return None
+
+    logger.warning(
+        "[auto-metadata] sending raw source of '%s' (%d chars) to the LLM. "
+        "Make sure the function body does not contain credentials or PII.",
+        func_name,
+        len(source_code),
+    )
 
     prompt = f"""
     Analyze the Python function below and generate a JSON object with two keys.

@@ -39,6 +39,19 @@ def test_build_filters_supports_operators():
     assert _build_weaviate_filters({"function_name__like": "foo"}) is not None
 
 
+def test_build_filters_rejects_unsafe_property_names():
+    """Filter keys outside [A-Za-z_][A-Za-z0-9_]* must be skipped, not forwarded
+    to Filter.by_property where they could target arbitrary identifiers."""
+    # Hyphens, dots, spaces, leading digits — all outside the safe pattern.
+    # Each filter has only the unsafe key, so the whole result should be None.
+    assert _build_weaviate_filters({"bad-key": "x"}) is None
+    assert _build_weaviate_filters({"some.field": "x"}) is None
+    assert _build_weaviate_filters({"with space": "x"}) is None
+    assert _build_weaviate_filters({"1leadingdigit": "x"}) is None
+    # Mixed: the safe key still produces a filter, the unsafe one is dropped.
+    assert _build_weaviate_filters({"status": "ok", "bad-key": "x"}) is not None
+
+
 # ---------------------------------------------------------------------------
 # E2E fixtures
 # ---------------------------------------------------------------------------

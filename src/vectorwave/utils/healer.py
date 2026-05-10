@@ -266,9 +266,25 @@ class VectorWaveHealer:
 
                 if final_imports:
                     # 파일 맨 위에 추가
-                    return "\n".join(final_imports) + "\n" + content_with_new_func
+                    final_content = "\n".join(final_imports) + "\n" + content_with_new_func
+                else:
+                    final_content = content_with_new_func
+            else:
+                final_content = content_with_new_func
 
-            return content_with_new_func
+            # 4. Refuse to ship a patch that doesn't even parse. The LLM is
+            # prone to producing slightly-wrong Python at low temperature, and
+            # without this guard a syntax error would be opened as a PR.
+            try:
+                ast.parse(final_content)
+            except SyntaxError as syn:
+                logger.error(
+                    f"Refusing to apply LLM patch: result is not valid Python "
+                    f"(line {syn.lineno}, col {syn.offset}): {syn.msg}"
+                )
+                return None
+
+            return final_content
 
         except Exception as e:
             logger.error(f"Patch application failed: {e}")

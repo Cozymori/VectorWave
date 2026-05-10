@@ -1,10 +1,17 @@
 import logging
+import re
 import weaviate
 import weaviate.classes as wvc
 from typing import Dict, Any, Optional, List, Tuple
 
 from weaviate.collections.classes.filters import _Filters
 from weaviate.classes.query import Filter
+
+# Conservative GraphQL/Weaviate property name shape — letters, digits,
+# underscores, must start with a letter or underscore. Filter keys outside
+# this shape are rejected so user-controlled input can't target arbitrary
+# server-side identifiers.
+_PROP_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 from ..models.db_config import get_weaviate_settings, WeaviateSettings
 from .db import get_cached_client
@@ -29,6 +36,14 @@ def _build_weaviate_filters(filters: Optional[Dict[str, Any]]) -> _Filters | Non
         parts = key.split('__')
         prop_name = parts[0]
         operator = parts[1] if len(parts) > 1 else 'equal'
+
+        if not _PROP_NAME_PATTERN.match(prop_name):
+            logger.warning(
+                "Rejecting filter on unsafe property name '%s'; expected "
+                "[A-Za-z_][A-Za-z0-9_]*. This filter clause will be skipped.",
+                prop_name,
+            )
+            continue
 
         try:
             prop = Filter.by_property(prop_name)
