@@ -202,38 +202,31 @@ def search_executions(
         sort_by: Optional[str] = "timestamp_utc",
         sort_ascending: bool = False
 ) -> List[Dict[str, Any]]:
-    # ... (No changes needed here)
     """
     Searches execution logs from the [VectorWaveExecutions] collection using filtering and sorting.
+
+    Routes through the VectorStore abstraction so it works in both Pro
+    (Weaviate) and Lite (LanceDB) modes.
     """
     try:
+        from ..store import get_vector_store
         settings: WeaviateSettings = get_weaviate_settings()
-        client: weaviate.WeaviateClient = get_cached_client()
-
-        collection = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
-        weaviate_filter = _build_weaviate_filters(filters)
-        weaviate_sort = None
-
-        if sort_by:
-            weaviate_sort = wvc.query.Sort.by_property(
-                name=sort_by,
-                ascending=sort_ascending
-            )
-
-        response = collection.query.fetch_objects(
+        store = get_vector_store()
+        records = store.query(
+            collection=settings.EXECUTION_COLLECTION_NAME,
+            filters=filters,
+            sort_by=sort_by,
+            sort_ascending=sort_ascending,
             limit=limit,
-            filters=weaviate_filter,
-            sort=weaviate_sort
         )
         results = []
-        for obj in response.objects:
-            props = obj.properties.copy()
-            props['uuid'] = str(obj.uuid)
-            for key, value in props.items():
+        for rec in records:
+            props = dict(rec.properties)
+            props["uuid"] = rec.uuid
+            for key, value in list(props.items()):
                 if isinstance(value, uuid.UUID) or isinstance(value, datetime):
                     props[key] = str(value)
             results.append(props)
-
         return results
 
     except Exception as e:
