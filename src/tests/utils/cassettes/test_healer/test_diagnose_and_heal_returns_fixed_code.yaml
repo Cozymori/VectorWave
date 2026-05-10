@@ -1,0 +1,25 @@
+interactions:
+- request:
+    body: '{"messages":[{"role":"system","content":"You are an expert Python debugger.
+      Analyze the code and errors provided, then generate a fixed version of the code."},{"role":"user","content":"prompt"}],"model":"gpt-4-turbo","temperature":0.1}'
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      authorization:
+      - REDACTED
+      content-type:
+      - application/json
+    method: POST
+    uri: https://api.openai.com/v1/chat/completions
+  response:
+    body:
+      string: '{"id":"chatcmpl-heal-001","object":"chat.completion","created":1735689700,"model":"gpt-4-turbo-2024-04-09","choices":[{"index":0,"message":{"role":"assistant","content":"```python\ndef mybuggy(a, b):\n    if b == 0:\n        return 0\n    return a / b\n```"},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":350,"completion_tokens":35,"total_tokens":385},"system_fingerprint":"fp_test"}'
+    headers:
+      content-type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+version: 1
