@@ -26,6 +26,51 @@ def pytest_configure(config):
         "markers",
         "e2e: requires a real Weaviate instance (provided by the weaviate_container fixture)",
     )
+    config.addinivalue_line(
+        "markers",
+        "live: hits real external APIs (OpenAI, etc.); excluded from PR runs",
+    )
+
+
+# ---------------------------------------------------------------------------
+# VCR / pytest-recording configuration
+#
+# Tests marked with @pytest.mark.vcr replay HTTP traffic from a YAML cassette
+# committed alongside the test. Authorization-style headers are stripped at
+# record time so secrets never reach the repo. Re-record by running pytest
+# with an OPENAI_API_KEY in the env and `--record-mode=once`.
+# ---------------------------------------------------------------------------
+
+_VCR_LLM_HOSTS = {"api.openai.com", "api.anthropic.com"}
+
+
+def _vcr_only_llm_hosts(request):
+    """Whitelist filter: pass through any request that isn't to a known LLM
+    provider so testcontainer (Weaviate) and version-check (PyPI) traffic
+    is not intercepted."""
+    if request.host in _VCR_LLM_HOSTS:
+        return request
+    return None
+
+
+@pytest.fixture(scope="session")
+def vcr_config():
+    return {
+        "filter_headers": [
+            ("authorization", "REDACTED"),
+            ("x-api-key", "REDACTED"),
+            ("openai-organization", "REDACTED"),
+            ("openai-project", "REDACTED"),
+            ("anthropic-api-key", "REDACTED"),
+            ("cookie", "REDACTED"),
+            ("set-cookie", "REDACTED"),
+        ],
+        "filter_query_parameters": [
+            ("api_key", "REDACTED"),
+        ],
+        "decode_compressed_response": True,
+        "before_record_request": _vcr_only_llm_hosts,
+    }
 
 
 def _delete_cache():

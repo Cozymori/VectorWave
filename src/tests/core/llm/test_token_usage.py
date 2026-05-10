@@ -1,112 +1,118 @@
+"""End-to-end tests for VectorWaveOpenAIClient using VCR cassettes.
+
+Real OpenAI HTTP traffic is replayed from YAML cassettes committed alongside
+the test, so the suite runs without an API key. Re-record by setting
+OPENAI_API_KEY in the env and running pytest with `--record-mode=once`.
+The session-level vcr_config in conftest strips Authorization-style headers
+before write, so cassettes never contain secrets.
+"""
+import time
+
 import pytest
-from unittest.mock import MagicMock, patch
+
 from vectorwave.core.llm.openai_client import VectorWaveOpenAIClient
+from vectorwave.database.db import (
+    create_usage_schema,
+    get_weaviate_client,
+)
+
+
+def _wait_for_count(coll, expected: int, timeout: float = 8.0) -> int:
+    deadline = time.time() + timeout
+    last = -1
+    while time.time() < deadline:
+        last = len(coll.query.fetch_objects(limit=200).objects)
+        if last >= expected:
+            return last
+        time.sleep(0.1)
+    raise AssertionError(f"expected at least {expected} rows, got {last}")
+
+
+def _clear_caches():
+    from vectorwave.models.db_config import get_weaviate_settings
+    from vectorwave.batch.batch import get_batch_manager
+    from vectorwave.database.db import get_cached_client
+    for fn in (get_weaviate_settings, get_batch_manager, get_cached_client):
+        fn.cache_clear()
+
 
 @pytest.fixture
-def mock_deps(monkeypatch):
-    """
-    Mocks the dependencies (BatchManager, OpenAI, Settings) of VectorWaveOpenAIClient.
-    """
-    # 1. Mock BatchManager (Target for verifying token usage persistence)
-    mock_batch = MagicMock()
-    mock_batch.add_object = MagicMock()
-    mock_get_batch = MagicMock(return_value=mock_batch)
-    monkeypatch.setattr("vectorwave.core.llm.openai_client.get_batch_manager", mock_get_batch)
+def openai_client_e2e(weaviate_container, monkeypatch):
+    """Configure a fast-flushing batch manager and ensure VectorWaveTokenUsage exists."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-cassette-replay")
+    monkeypatch.setenv("BATCH_THRESHOLD", "1")
+    monkeypatch.setenv("FLUSH_INTERVAL_SECONDS", "0.1")
+    _clear_caches()
 
-    # 2. Mock Settings (Bypasses API Key check)
-    mock_settings = MagicMock()
-    mock_settings.OPENAI_API_KEY = "sk-test-key"
-    mock_get_settings = MagicMock(return_value=mock_settings)
-    monkeypatch.setattr("vectorwave.core.llm.openai_client.get_weaviate_settings", mock_get_settings)
+    from vectorwave.models.db_config import get_weaviate_settings
+    settings = get_weaviate_settings()
 
-    # 3. Mock OpenAI Class (Bypasses actual API calls)
-    mock_openai_cls = MagicMock()
-    monkeypatch.setattr("vectorwave.core.llm.openai_client.OpenAI", mock_openai_cls)
+    client = get_weaviate_client(settings)
+    try:
+        if client.collections.exists("VectorWaveTokenUsage"):
+            client.collections.delete("VectorWaveTokenUsage")
+        create_usage_schema(client, settings)
+    finally:
+        client.close()
 
-    # Note: Clearing the lru_cache for the singleton instance is typically
-    # needed if the client is imported globally. We assume the current test
-    # setup allows for fresh initialization here.
+    yield settings
+    _clear_caches()
 
-    return {
-        "batch": mock_batch,
-        "openai_cls": mock_openai_cls
-    }
 
-def test_chat_completion_logs_token_usage(mock_deps):
-    """
-    [Case 1] Verify that token usage is logged as 'generation' type during chat completion.
-    """
-    # Arrange
-    # Get the mock client instance returned when OpenAI() is called
-    mock_client_instance = mock_deps["openai_cls"].return_value
+@pytest.mark.e2e
+@pytest.mark.vcr
+def test_chat_completion_returns_content_and_logs_tokens(openai_client_e2e):
+    """A real OpenAI chat-completion request (replayed from a cassette) returns
+    the assistant message and writes a token-usage row to Weaviate."""
+    settings = openai_client_e2e
+    llm = VectorWaveOpenAIClient()
 
-    # Mock OpenAI Response structure
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock(message=MagicMock(content="Test response"))]
-    mock_response.usage.total_tokens = 123  # Token count to test
-    mock_client_instance.chat.completions.create.return_value = mock_response
-
-    # Act
-    # Create a new client instance for the test
-    client = VectorWaveOpenAIClient()
-    result = client.create_chat_completion(
-        messages=[{"role": "user", "content": "Hi"}],
-        model="gpt-4-test",
-        category="test_chat_category"
+    response = llm.create_chat_completion(
+        messages=[{"role": "user", "content": "Say hello in one word."}],
+        model="gpt-4o-mini",
+        temperature=0.0,
+        category="cassette_chat",
     )
 
-    # Assert
-    # 1. Verify that the function returns the expected result
-    assert result == "Test response"
+    assert response == "Hello"
 
-    # 2. Verify that BatchManager.add_object was called (log saved)
-    mock_batch = mock_deps["batch"]
-    mock_batch.add_object.assert_called_once()
+    client = get_weaviate_client(settings)
+    try:
+        usage = client.collections.get("VectorWaveTokenUsage")
+        _wait_for_count(usage, 1)
+        objs = list(usage.iterator())
+        assert len(objs) == 1
+        props = objs[0].properties
+        assert props["tokens"] == 16
+        assert props["model"] == "gpt-4o-mini"
+        assert props["category"] == "cassette_chat"
+        assert props["usage_type"] == "generation"
+    finally:
+        client.close()
 
-    # 3. Verify the properties of the saved log entry
-    call_kwargs = mock_batch.add_object.call_args.kwargs
-    props = call_kwargs["properties"]
 
-    assert call_kwargs["collection"] == "VectorWaveTokenUsage"
-    assert props["tokens"] == 123
-    assert props["model"] == "gpt-4-test"
-    assert props["category"] == "test_chat_category"
-    assert props["usage_type"] == "generation"
+@pytest.mark.e2e
+@pytest.mark.vcr
+def test_create_embedding_returns_vector_and_logs_tokens(openai_client_e2e):
+    """An embedding request returns the vector and writes its token usage."""
+    settings = openai_client_e2e
+    llm = VectorWaveOpenAIClient()
 
-def test_create_embedding_logs_token_usage(mock_deps):
-    """
-    [Case 2] Verify that token usage is logged as 'embedding' type during embedding creation.
-    """
-    # Arrange
-    mock_client_instance = mock_deps["openai_cls"].return_value
-
-    # Mock OpenAI Response structure
-    mock_response = MagicMock()
-    mock_response.data = [MagicMock(embedding=[0.1, 0.2, 0.3])]
-    mock_response.usage.total_tokens = 45  # Token count to test
-    mock_client_instance.embeddings.create.return_value = mock_response
-
-    # Act
-    client = VectorWaveOpenAIClient()
-    result = client.create_embedding(
-        text="Test text",
+    vector = llm.create_embedding(
+        text="Test text for embedding",
         model="text-embedding-3-small",
-        category="test_embed_category"
+        category="cassette_embed",
     )
 
-    # Assert
-    # 1. Verify that the function returns the expected result
-    assert result == [0.1, 0.2, 0.3]
+    assert vector == [0.1, 0.2, 0.3, 0.4, 0.5]
 
-    # 2. Verify that BatchManager.add_object was called
-    mock_batch = mock_deps["batch"]
-    mock_batch.add_object.assert_called_once()
-
-    # 3. Verify the properties of the saved log entry
-    call_kwargs = mock_batch.add_object.call_args.kwargs
-    props = call_kwargs["properties"]
-
-    assert call_kwargs["collection"] == "VectorWaveTokenUsage"
-    assert props["tokens"] == 45
-    assert props["usage_type"] == "embedding"
-    assert props["category"] == "test_embed_category"
+    client = get_weaviate_client(settings)
+    try:
+        usage = client.collections.get("VectorWaveTokenUsage")
+        _wait_for_count(usage, 1)
+        props = list(usage.iterator())[0].properties
+        assert props["tokens"] == 5
+        assert props["category"] == "cassette_embed"
+        assert props["usage_type"] == "embedding"
+    finally:
+        client.close()
