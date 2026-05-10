@@ -4,6 +4,7 @@
 end-to-end without manually wiring docker-compose, env vars, and the Rust build.
 """
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -14,7 +15,10 @@ from importlib import resources
 from pathlib import Path
 
 PROJECT_NAME = "vectorwave-dev"
-WEAVIATE_READY_URL = "http://localhost:8080/v1/.well-known/ready"
+WEAVIATE_HOST = "localhost"
+WEAVIATE_HTTP_PORT = 8080
+WEAVIATE_GRPC_PORT = 50051
+WEAVIATE_READY_URL = f"http://{WEAVIATE_HOST}:{WEAVIATE_HTTP_PORT}/v1/.well-known/ready"
 WEAVIATE_READY_TIMEOUT_S = 60
 
 
@@ -116,6 +120,120 @@ def cmd_logs(args: argparse.Namespace) -> int:
     return _compose(*compose_args).returncode
 
 
+def _check_running() -> bool:
+    try:
+        with urllib.request.urlopen(WEAVIATE_READY_URL, timeout=2) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def cmd_shell(args: argparse.Namespace) -> int:
+    """Drop into a subshell with WEAVIATE_* env vars exported."""
+    if not _check_running():
+        print(
+            "[error] Weaviate is not reachable at "
+            f"{WEAVIATE_READY_URL}. Run 'vectorwave dev start' first.",
+            file=sys.stderr,
+        )
+        return 1
+    env = os.environ.copy()
+    env["WEAVIATE_HOST"] = WEAVIATE_HOST
+    env["WEAVIATE_PORT"] = str(WEAVIATE_HTTP_PORT)
+    env["WEAVIATE_GRPC_PORT"] = str(WEAVIATE_GRPC_PORT)
+    env.setdefault("VECTORWAVE_DEV_SHELL", "1")
+    shell = args.shell or env.get("SHELL") or "/bin/bash"
+    print(f"[shell] starting {shell} with WEAVIATE_HOST/PORT/GRPC_PORT exported")
+    print("[shell]   exit or Ctrl-D to leave")
+    return subprocess.run([shell], env=env).returncode
+
+
+def cmd_seed(_args: argparse.Namespace) -> int:
+    """Seed a small set of sample functions + executions for demo / smoke testing."""
+    if not _check_running():
+        print(
+            "[error] Weaviate is not reachable at "
+            f"{WEAVIATE_READY_URL}. Run 'vectorwave dev start' first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    os.environ.setdefault("WEAVIATE_HOST", WEAVIATE_HOST)
+    os.environ.setdefault("WEAVIATE_PORT", str(WEAVIATE_HTTP_PORT))
+    os.environ.setdefault("WEAVIATE_GRPC_PORT", str(WEAVIATE_GRPC_PORT))
+    # Demo data uses no vectorizer so the seed runs without an OpenAI key.
+    os.environ["VECTORIZER"] = "none"
+    os.environ["IS_VECTORIZE_COLLECTION_NAME"] = "False"
+
+    try:
+        from vectorwave.database.db import (
+            create_execution_schema,
+            create_vectorwave_schema,
+            get_weaviate_client,
+        )
+        from vectorwave.models.db_config import get_weaviate_settings
+    except ImportError as e:
+        print(f"[error] failed to import vectorwave: {e}", file=sys.stderr)
+        return 1
+
+    # Reset cached singletons so the seeded settings pick up fresh env vars.
+    from vectorwave.models.db_config import get_weaviate_settings as _gws
+    if hasattr(_gws, "cache_clear"):
+        _gws.cache_clear()
+
+    settings = get_weaviate_settings()
+    client = get_weaviate_client(settings)
+    try:
+        # Recreate collections with vectorizer=none so the seed is self-contained.
+        for name in (settings.COLLECTION_NAME, settings.EXECUTION_COLLECTION_NAME):
+            if client.collections.exists(name):
+                client.collections.delete(name)
+        create_vectorwave_schema(client, settings)
+        create_execution_schema(client, settings)
+
+        funcs = client.collections.get(settings.COLLECTION_NAME)
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+
+        from datetime import datetime, timezone
+        from uuid import uuid4
+
+        now = datetime.now(timezone.utc).isoformat()
+        sample_funcs = [
+            {"function_name": "calculate_total", "module_name": "demo.billing",
+             "file_path": "demo/billing.py", "docstring": "Sum line items with tax",
+             "source_code": "def calculate_total(items, rate):\n    return sum(i*rate for i in items)\n",
+             "search_description": "Compute total price with tax rate",
+             "sequence_narrative": "Iterates items, multiplies each by rate, sums."},
+            {"function_name": "render_card", "module_name": "demo.ui",
+             "file_path": "demo/ui.py", "docstring": "Render a card",
+             "source_code": "def render_card(props):\n    return f'<div>{props}</div>'\n",
+             "search_description": "Render a UI card from props",
+             "sequence_narrative": "Wraps props in a div tag."},
+        ]
+        for props in sample_funcs:
+            funcs.data.insert(properties=props)
+
+        sample_execs = [
+            {"function_uuid": str(uuid4()), "function_name": "calculate_total",
+             "status": "SUCCESS", "duration_ms": 12.5, "timestamp_utc": now,
+             "return_value": "42.0"},
+            {"function_uuid": str(uuid4()), "function_name": "calculate_total",
+             "status": "ERROR", "duration_ms": 3.2, "timestamp_utc": now,
+             "error_message": "TypeError: unsupported operand", "error_code": "TypeError"},
+            {"function_uuid": str(uuid4()), "function_name": "render_card",
+             "status": "SUCCESS", "duration_ms": 0.4, "timestamp_utc": now,
+             "return_value": "'<div>{}</div>'"},
+        ]
+        for props in sample_execs:
+            execs.data.insert(properties=props)
+
+        print(f"[seed] inserted {len(sample_funcs)} functions and {len(sample_execs)} execution logs")
+        print("       try: vectorwave dev shell  →  python -c 'from vectorwave.search import ...'")
+    finally:
+        client.close()
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vectorwave")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
@@ -133,6 +251,12 @@ def _build_parser() -> argparse.ArgumentParser:
     logs.add_argument("-f", "--follow", action="store_true")
     logs.add_argument("-n", "--tail", type=int, default=100)
     logs.set_defaults(func=cmd_logs)
+
+    shell = dev_sub.add_parser("shell", help="Drop into a subshell with WEAVIATE_* env vars exported")
+    shell.add_argument("--shell", help="Shell binary to invoke (default: $SHELL or /bin/bash)")
+    shell.set_defaults(func=cmd_shell)
+
+    dev_sub.add_parser("seed", help="Insert a small demo dataset of functions + execution logs").set_defaults(func=cmd_seed)
 
     return parser
 
