@@ -311,3 +311,55 @@ def test_semantic_cache_disables_when_no_vectorizer(no_vectorizer_env, caplog):
     warnings = [r for r in caplog.records if "Semantic caching requested" in r.message]
     assert len(warnings) == 1
     assert "no Python vectorizer" in warnings[0].message
+
+
+# ---------------------------------------------------------------------------
+# Regression: a function that legitimately returns None must still be served
+# from cache on a second identical call (was a CACHE_MISS-vs-None bug).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.e2e
+def test_function_returning_none_is_cached(semantic_cache_env):
+    """Regression for the CACHE_MISS sentinel: a function whose legitimate
+    return value is None must still be served from cache on a second call."""
+    settings = semantic_cache_env
+    call_count = {"n": 0}
+
+    # Use a single-token, file-unique name so the cross-session container's
+    # word-tokenized function_name filter doesn't collide with leftover rows
+    # from prior tests in this file.
+    @vectorize(
+        search_description="Returns None",
+        sequence_narrative="Should still cache",
+        semantic_cache=True,
+        cache_threshold=0.5,
+    )
+    def nonecachefn(query):
+        call_count["n"] += 1
+        return None
+
+    assert nonecachefn(query="hello") is None
+
+    # Wait until our specific function's SUCCESS row is visible (don't trust
+    # a generic "any row" count — leftover rows from earlier tests would
+    # satisfy that immediately, before this call's row has propagated).
+    import weaviate.classes.query as wvc_query
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        deadline = time.time() + 8
+        last = -1
+        while time.time() < deadline:
+            last = len(execs.query.fetch_objects(
+                filters=wvc_query.Filter.by_property("function_name").equal("nonecachefn"),
+                limit=10,
+            ).objects)
+            if last >= 1:
+                break
+            time.sleep(0.1)
+        assert last >= 1, f"nonecachefn SUCCESS row never indexed (last count={last})"
+    finally:
+        client.close()
+
+    assert nonecachefn(query="hello") is None
+    assert call_count["n"] == 1, "second call must hit the cache, not re-execute"

@@ -19,6 +19,12 @@ from ..database.db import get_cached_client
 
 logger = logging.getLogger(__name__)
 
+# Sentinel returned by _check_and_return_cached_result on miss.
+# A bare None is reserved for legitimate cache hits whose stored return value
+# is None — using None for both would mask functions that legitimately return
+# None as if they had no cache entry.
+CACHE_MISS = object()
+
 
 def _check_and_return_cached_result(
         func: Callable,
@@ -28,21 +34,22 @@ def _check_and_return_cached_result(
         cache_threshold: float,
         is_async: bool,
         filters: Optional[Dict[str, Any]] = None  # [NEW] 인자 추가
-) -> Optional[Any]:
+) -> Any:
     """
-    Checks for a cached result.
+    Checks for a cached result. Returns the cached return value (which may be
+    None) on hit, or the `CACHE_MISS` sentinel on miss/error.
     Priority 1: VectorWaveGoldenDataset (Golden Data)
     Priority 2: VectorWaveExecutions (Standard Logs)
     """
     if not cache_threshold:
-        return None
+        return CACHE_MISS
 
     settings: WeaviateSettings = get_weaviate_settings()
     vectorizer = get_vectorizer()
 
     if vectorizer is None:
         logger.error(f"Cannot perform vectorization for caching on '{function_name}': Vectorizer is None.")
-        return None
+        return CACHE_MISS
 
     try:
         # (A) Create vectorization data
@@ -157,8 +164,8 @@ def _check_and_return_cached_result(
 
             return _deserialize_return_value(cached_log.get('return_value'))
 
-        return None
+        return CACHE_MISS
 
     except Exception as e:
         logger.error(f"Failed to check semantic cache for '{function_name}': {e}", exc_info=True)
-        return None
+        return CACHE_MISS
