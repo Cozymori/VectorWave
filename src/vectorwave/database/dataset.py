@@ -54,9 +54,11 @@ class VectorWaveDatasetManager:
                 "tags": tags if tags else []
             }
 
-            # 3. Save (reuse original vector)
+            # 3. Save (reuse original vector). Weaviate v4's `self_provided`
+            # vectorizer returns an empty list (not None) when no vector was
+            # stored, so reject any falsy value.
             vector = (log_obj.vector or {}).get("default")
-            if vector is None:
+            if not vector:
                 logger.error(
                     f"Log '{log_uuid}' has no stored vector. "
                     "The source function must have capture_return_value=True for vector storage."
