@@ -21,6 +21,28 @@ from .serialization import deserialize_return_value
 logger = logging.getLogger(__name__)
 
 
+def _run_coroutine_safely(coro):
+    """Drive an async coroutine to completion regardless of whether the caller
+    is already inside a running event loop.
+
+    `asyncio.run` raises RuntimeError when invoked from within a running loop
+    (FastAPI handler, Jupyter cell, another coroutine). This helper falls back
+    to a fresh thread + dedicated loop in that case so the replayer keeps its
+    blocking signature.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop in this thread — the simple path.
+        return asyncio.run(coro)
+
+    # We're inside a running loop. Run the coroutine in a worker thread that
+    # owns its own loop so we don't try to nest event loops.
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(asyncio.run, coro).result()
+
+
 class VectorWaveReplayer:
     """
     A class that performs automated regression testing (Replay) based on VectorWave execution logs.
@@ -114,7 +136,7 @@ class VectorWaveReplayer:
                                 mock_obj.return_value = behavior
 
                     if is_async_func:
-                        actual_output = asyncio.run(target_func(**inputs))
+                        actual_output = _run_coroutine_safely(target_func(**inputs))
                     else:
                         actual_output = target_func(**inputs)
 
