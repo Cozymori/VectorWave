@@ -10,7 +10,7 @@ from ..batch.batch import get_batch_manager
 from ..models.db_config import get_weaviate_settings
 from ..monitoring.tracer import trace_root, trace_span
 from ..utils.function_cache import function_cache_manager
-from ..utils.return_caching_utils import _check_and_return_cached_result
+from ..utils.return_caching_utils import CACHE_MISS, _check_and_return_cached_result
 from ..vectorizer.factory import get_vectorizer
 from ..utils.context import execution_source_context
 from ..utils.path_utils import get_repo_root_and_relative_path
@@ -178,9 +178,11 @@ def vectorize(search_description: Optional[str] = None,
         # --- Wrapper Logic ---
 
         def _try_cache(args, kwargs):
-            """Check semantic cache. Returns cached result or None."""
+            """Check semantic cache. Returns the cached value (possibly None) on
+            hit, or CACHE_MISS on miss — using a sentinel lets functions that
+            legitimately return None still be cached."""
             if not semantic_cache:
-                return None
+                return CACHE_MISS
             filters = resolve_semantic_filters(args, kwargs)
             return _check_and_return_cached_result(
                 func, args, kwargs, function_name, cache_threshold,
@@ -212,7 +214,7 @@ def vectorize(search_description: Optional[str] = None,
             @wraps(func)
             async def outer_wrapper(*args, **kwargs):
                 cached = _try_cache(args, kwargs)
-                if cached is not None:
+                if cached is not CACHE_MISS:
                     return cached
                 return await inner_wrapper(*args, **_build_full_kwargs(kwargs))
 
@@ -236,7 +238,7 @@ def vectorize(search_description: Optional[str] = None,
             @wraps(func)
             def outer_wrapper(*args, **kwargs):
                 cached = _try_cache(args, kwargs)
-                if cached is not None:
+                if cached is not CACHE_MISS:
                     return cached
                 return inner_wrapper(*args, **_build_full_kwargs(kwargs))
 

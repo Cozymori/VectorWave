@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 import json
 import weaviate.classes.query as wvc_query
-from vectorwave.utils.return_caching_utils import _check_and_return_cached_result
+from vectorwave.utils.return_caching_utils import _check_and_return_cached_result, CACHE_MISS
 from vectorwave.models.db_config import WeaviateSettings
 
 
@@ -141,7 +141,9 @@ def test_check_and_return_cached_result_cache_hit_logging(mock_caching_utils_dep
 
 def test_check_and_return_cached_result_cache_miss(mock_caching_utils_deps):
     """
-    [Case 2] Verify that None is returned without logging upon a cache miss.
+    [Case 2] Verify that the CACHE_MISS sentinel is returned without logging
+    upon a cache miss. Using a sentinel (not None) lets functions whose
+    legitimate return value is None still be served from cache.
     """
     with patch("vectorwave.utils.return_caching_utils.search_similar_execution", return_value=None):
         def dummy_func(): pass
@@ -155,7 +157,7 @@ def test_check_and_return_cached_result_cache_miss(mock_caching_utils_deps):
             is_async=False
         )
 
-    assert result is None
+    assert result is CACHE_MISS
     mock_caching_utils_deps["batch_manager"].add_object.assert_not_called()
 
 

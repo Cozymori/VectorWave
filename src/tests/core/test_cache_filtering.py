@@ -3,6 +3,7 @@ from unittest.mock import patch, MagicMock
 
 # Import VectorWave module
 from vectorwave.core.decorator import vectorize
+from vectorwave.utils.return_caching_utils import CACHE_MISS
 
 class TestVectorWaveExtensions:
 
@@ -58,7 +59,7 @@ class TestVectorWaveExtensions:
         are correctly passed to the caching logic (_check_and_return_cached_result).
         """
         mock_check_cache = mock_dependencies['check_cache']
-        mock_check_cache.return_value = None  # Assume cache miss
+        mock_check_cache.return_value = CACHE_MISS  # Assume cache miss
 
         static_filter = {'environment': 'production', 'version__gte': 2}
 
@@ -83,7 +84,7 @@ class TestVectorWaveExtensions:
         correctly generates filters based on argument values at runtime.
         """
         mock_check_cache = mock_dependencies['check_cache']
-        mock_check_cache.return_value = None
+        mock_check_cache.return_value = CACHE_MISS
 
         @vectorize(
             semantic_cache=True,
@@ -108,7 +109,7 @@ class TestVectorWaveExtensions:
         [Feature 4] Test if static filters and dynamic scope are merged correctly when used together.
         """
         mock_check_cache = mock_dependencies['check_cache']
-        mock_check_cache.return_value = None
+        mock_check_cache.return_value = CACHE_MISS
 
         @vectorize(
             semantic_cache=True,
