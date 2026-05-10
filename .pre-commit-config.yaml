@@ -1,0 +1,17 @@
+# Run `pre-commit install` once to wire these hooks into .git/hooks/pre-commit.
+# (`pip install pre-commit` first if you don't have the framework.)
+repos:
+  - repo: local
+    hooks:
+      - id: check-secrets
+        name: Block LLM/API secrets in commits
+        entry: python scripts/check_secrets.py
+        language: system
+        types_or: [python, yaml, json, toml, markdown, text, shell]
+        # Cassettes don't carry an extension that always matches `types_or`,
+        # so include them by path as a safety net.
+        files: |
+          (?x)^(
+            .*\.(py|yaml|yml|json|toml|md|txt|cfg|ini|sh|env)|
+            .*cassettes/.*
+          )$
