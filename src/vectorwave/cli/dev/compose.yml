@@ -1,0 +1,33 @@
+services:
+  weaviate:
+    image: semitechnologies/weaviate:1.28.4
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    environment:
+      AUTHENTICATION_ANONYMOUS_ENABLED: 'true'
+      PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
+      CLUSTER_HOSTNAME: 'node1'
+      DEFAULT_VECTORIZER_MODULE: 'none'
+      ENABLE_MODULES: 'text2vec-openai'
+      OPENAI_APIKEY: ${OPENAI_API_KEY:-}
+      QUERY_DEFAULTS_LIMIT: '25'
+    volumes:
+      - vectorwave-dev-data:/var/lib/weaviate
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/v1/.well-known/ready || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  console:
+    image: semitechnologies/weaviate-console:latest
+    ports:
+      - "8081:8080"
+    environment:
+      WEAVIATE_URL: "http://weaviate:8080"
+    depends_on:
+      - weaviate
+
+volumes:
+  vectorwave-dev-data:

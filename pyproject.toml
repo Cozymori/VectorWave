@@ -35,6 +35,17 @@ dependencies = [
     "schedule"
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "flake8",
+    "testcontainers>=4.0.0",
+]
+
+[project.scripts]
+vectorwave = "vectorwave.cli:main"
+
 [project.urls]
 Repository = "https://github.com/cozymori/vectorwave"
 
@@ -43,3 +54,4 @@ python-source = "src"
 module-name = "vectorwave.vectorwave_core"
 manifest-path = "crates/Cargo.toml"
 features = ["pyo3/extension-module"]
+include = ["src/vectorwave/cli/dev/compose.yml"]
