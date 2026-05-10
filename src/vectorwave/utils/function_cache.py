@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from typing import Dict, Any, Optional
 from ..models.db_config import get_weaviate_settings
 
@@ -15,6 +16,10 @@ class FunctionCacheManager:
 
     def __init__(self, cache_dir: str = "."):
         self.cache_path = os.path.join(cache_dir, CACHE_FILE_NAME)
+        # Guards both the in-memory dict and the on-disk JSON. Concurrent
+        # @vectorize decorations from parallel imports would otherwise
+        # interleave json.dump calls and corrupt the file.
+        self._lock = threading.Lock()
         self.cache: Dict[str, Any] = self._load_cache()
         logger.info(f"FunctionCacheManager initialized. Cache file: {self.cache_path}")
 
@@ -28,7 +33,8 @@ class FunctionCacheManager:
             logger.warning(f"Failed to load cache. Starting clean. Error: {e}")
             return {}
 
-    def _save_cache(self):
+    def _save_cache_locked(self):
+        """Caller must hold self._lock."""
         try:
             with open(self.cache_path, 'w', encoding='utf-8') as f:
                 json.dump(self.cache, f, indent=4, sort_keys=True)
@@ -72,16 +78,18 @@ class FunctionCacheManager:
 
     def update_cache(self, func_uuid: str, current_hash: str):
         """Legacy update: saves only hash."""
-        self.cache[func_uuid] = {"hash": current_hash, "metadata": None}
-        self._save_cache()
+        with self._lock:
+            self.cache[func_uuid] = {"hash": current_hash, "metadata": None}
+            self._save_cache_locked()
 
     def update_cache_with_metadata(self, func_uuid: str, current_hash: str, metadata: Dict[str, Any]):
         """[NEW] Updates cache with hash and generated metadata."""
-        self.cache[func_uuid] = {
-            "hash": current_hash,
-            "metadata": metadata
-        }
-        self._save_cache()
+        with self._lock:
+            self.cache[func_uuid] = {
+                "hash": current_hash,
+                "metadata": metadata
+            }
+            self._save_cache_locked()
 
 
 def initialize_cache_manager() -> FunctionCacheManager:

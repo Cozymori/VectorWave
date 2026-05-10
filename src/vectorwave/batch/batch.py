@@ -30,6 +30,7 @@ class WeaviateBatchManager:
     def __init__(self, host: Optional[str] = None, port: Optional[int] = None,
                  grpc_port: Optional[int] = None, api_key: Optional[str] = None):
         self._initialized = False
+        self._shutdown_done = False
         self.settings: WeaviateSettings = get_weaviate_settings()
         self.client: Optional[weaviate.WeaviateClient] = None
 
@@ -161,9 +162,18 @@ class WeaviateBatchManager:
                 last_flush_time = current_time
 
     def shutdown(self):
-        """Gracefully shuts down."""
+        """Gracefully shuts down. Idempotent — repeated calls are no-ops, so the
+        atexit handler firing after a test-time cache_clear cannot trigger a
+        second shutdown on an already-closed Rust worker or Weaviate client."""
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+
         if USE_RUST_CORE:
-            self._rust_manager.shutdown()
+            try:
+                self._rust_manager.shutdown()
+            except Exception as e:
+                logger.debug(f"Rust manager shutdown raised: {e}")
         else:
             if not self._stop_event.is_set():
                 self._stop_event.set()
@@ -181,7 +191,7 @@ class WeaviateBatchManager:
         if self.client:
             try:
                 self.client.close()
-            except:
+            except Exception:
                 pass
 
 @lru_cache()

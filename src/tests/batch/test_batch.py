@@ -42,6 +42,34 @@ def test_batch_manager_init_marks_uninitialized_when_connect_fails(monkeypatch):
     assert manager._initialized is False
 
 
+def test_batch_manager_shutdown_is_idempotent(monkeypatch):
+    """Repeated shutdown calls (atexit + explicit) must not double-close the
+    Rust manager or the Weaviate client. Without the _shutdown_done guard,
+    the second call would re-enter Rust shutdown / client.close()."""
+    mock_client = MagicMock()
+    mock_client.is_ready.return_value = True
+
+    monkeypatch.setattr(
+        "vectorwave.batch.batch.get_weaviate_client",
+        MagicMock(return_value=mock_client),
+    )
+    monkeypatch.setattr(
+        "vectorwave.batch.batch.get_weaviate_settings",
+        MagicMock(return_value=WeaviateSettings()),
+    )
+
+    get_batch_manager.cache_clear()
+    manager = get_batch_manager()
+
+    manager.shutdown()
+    manager.shutdown()
+    manager.shutdown()
+
+    # client.close() is called once during the first shutdown; subsequent
+    # shutdowns should short-circuit before reaching it.
+    assert mock_client.close.call_count == 1
+
+
 # ---------------------------------------------------------------------------
 # E2E tests
 # ---------------------------------------------------------------------------
