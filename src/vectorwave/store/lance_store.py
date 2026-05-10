@@ -270,7 +270,8 @@ class LanceVectorStore(VectorStore):
         # LanceDB's `delete` takes a SQL expression. We can't easily push our
         # dict-style filters down without translating each operator, so do a
         # Python-side fetch + bulk delete by uuid list.
-        all_rows = tbl.to_pandas().to_dict("records")
+        # `to_arrow().to_pylist()` keeps us off the pandas dependency path.
+        all_rows = tbl.to_arrow().to_pylist()
         targets = [r["uuid"] for r in all_rows
                    if _matches_filter(_deserialize_properties(r.get("payload")), filters)]
         if not targets:
@@ -306,10 +307,10 @@ class LanceVectorStore(VectorStore):
         return_properties: Optional[List[str]] = None,
     ) -> List[StoreRecord]:
         tbl = self._open(collection)
-        # Fetch-all-then-filter — fine for Lite mode dataset sizes.
-        df = tbl.to_pandas()
+        # Fetch-all-then-filter — fine for Lite mode dataset sizes. Using
+        # to_arrow keeps the runtime free of a pandas dependency.
+        rows = tbl.to_arrow().to_pylist()
         records: List[StoreRecord] = []
-        rows = df.to_dict("records")
         filtered = [r for r in rows if _matches_filter(_deserialize_properties(r.get("payload")), filters)]
         if sort_by:
             def _sort_key(row):
@@ -359,5 +360,5 @@ class LanceVectorStore(VectorStore):
 
     def iterate(self, collection: str, batch_size: int = 100) -> Iterable[StoreRecord]:
         tbl = self._open(collection)
-        for r in tbl.to_pandas().to_dict("records"):
+        for r in tbl.to_arrow().to_pylist():
             yield _row_to_record(r)
