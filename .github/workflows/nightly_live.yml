@@ -1,0 +1,50 @@
+name: Nightly Live API Tests
+
+# Runs tests marked @pytest.mark.live (real OpenAI/Anthropic calls) once a day
+# to detect upstream API drift that committed VCR cassettes would mask.
+# Skipped on PRs because secrets are not exposed to forks.
+
+on:
+  schedule:
+    - cron: '17 4 * * *'  # 04:17 UTC daily
+  workflow_dispatch:       # allow manual trigger from the Actions tab
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'Cozymori'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies and build extension
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" maturin
+          maturin develop
+
+      - name: Run live tests (drift detection against real APIs)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: pytest -m "live" --tb=short
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "::warning::Live API tests failed — committed VCR cassettes may be out of sync with the provider's current response shape."
