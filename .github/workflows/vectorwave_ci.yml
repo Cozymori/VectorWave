@@ -40,10 +40,12 @@ jobs:
           key: hf-${{ runner.os }}-minilm-l6-v2
 
       - name: Install dependencies and build extension
+        # `pip install -e .` invokes the maturin build backend, which compiles
+        # and installs the Rust extension. A separate `maturin develop` would
+        # require an active virtualenv we don't set up here.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]" maturin
-          maturin develop
+          pip install -e ".[dev]"
 
       - name: Lint (hard errors only)
         run: flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
