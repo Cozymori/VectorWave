@@ -39,8 +39,10 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-asyncio",
+    "pytest-recording",
     "flake8",
     "testcontainers>=4.0.0",
+    "vcrpy>=6.0.0",
 ]
 
 [project.scripts]
