@@ -42,8 +42,12 @@ dev = [
     "pytest-benchmark",
     "pytest-recording",
     "flake8",
+    "lancedb>=0.30.0",
     "testcontainers>=4.0.0",
     "vcrpy>=6.0.0",
+]
+lite = [
+    "lancedb>=0.30.0",
 ]
 
 [project.scripts]

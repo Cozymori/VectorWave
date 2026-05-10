@@ -22,6 +22,26 @@ vectorwave dev start
 You should now be able to run any script under `test_ex/` and see VectorWave
 write to the local Weaviate.
 
+## Modes: Pro vs Lite
+
+VectorWave's storage layer is now backend-agnostic via the `VectorStore`
+interface (`src/vectorwave/store/`). Two backends ship today:
+
+| Mode | Backend | Set with | Use when |
+|---|---|---|---|
+| `pro` (default) | Weaviate via Docker compose | unset or `VECTORWAVE_MODE=pro` | production, full feature set |
+| `lite` | LanceDB local file store | `VECTORWAVE_MODE=lite` | hackathons, Colab, quick demos — no Docker |
+
+In Lite mode VectorWave writes to `.vectorwave/lance/` (override with
+`VECTORWAVE_LITE_PATH`) and works offline with `pip install vectorwave`
+plus a Python-side vectorizer (default: HuggingFace `all-MiniLM-L6-v2`).
+
+Lite mode currently supports the core `@vectorize` flow: function
+metadata, execution logs, basic filter/sort fetch via
+`find_executions`, and vector cache lookup. Hybrid search and Weaviate's
+modular vectorizers (`text2vec-openai` etc.) remain Pro-only — see
+issue #95 for the migration roadmap.
+
 ## Dev environment CLI
 
 `vectorwave dev` manages a containerised Weaviate + console stack so you

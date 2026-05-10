@@ -1,3 +1,4 @@
+import os
 import weaviate
 import atexit
 import logging
@@ -34,6 +35,11 @@ class WeaviateBatchManager:
         self.settings: WeaviateSettings = get_weaviate_settings()
         self.client: Optional[weaviate.WeaviateClient] = None
 
+        # Lite mode (LanceDB local file store) skips the Weaviate client entirely.
+        # When VECTORWAVE_MODE=lite, _flush_batch_core delegates to the
+        # configured VectorStore so no Docker / Weaviate connection is needed.
+        self._lite_mode = os.environ.get("VECTORWAVE_MODE", "pro").lower() == "lite"
+
         # Store dynamic connection params
         self._host = host
         self._port = port
@@ -66,7 +72,19 @@ class WeaviateBatchManager:
         atexit.register(self.shutdown)
 
     def _connect_client(self):
-        """Attempts to connect to Weaviate."""
+        """Attempts to connect to the configured backend (Weaviate or Lite store)."""
+        if self._lite_mode:
+            try:
+                from ..store import get_vector_store
+                store = get_vector_store()
+                if store.is_ready():
+                    self._initialized = True
+                    self.client = None  # not used in Lite mode
+            except Exception as e:
+                logger.warning(f"Lite store init failed: {e}")
+                self._initialized = False
+            return
+
         try:
             if self._host is not None:
                 self.client = get_weaviate_client(
@@ -109,17 +127,27 @@ class WeaviateBatchManager:
     def _flush_batch_core(self, items: List[Dict[str, Any]]):
         """
         The actual flush logic called by either Rust or Python worker.
+
+        In Pro mode (default) this uses Weaviate's bulk batch.dynamic() context.
+        In Lite mode it groups items by collection and calls
+        VectorStore.insert_many — LanceDB has no equivalent of Weaviate's
+        single-context bulk write, but per-collection batching is fine for the
+        Lite use case.
         """
         if not items:
             return
 
         # 1. Check/Retry Connection
-        if not self._initialized or not self.client:
+        if not self._initialized or (not self._lite_mode and not self.client):
             self._connect_client()
             if not self._initialized:
                 return
 
-        # 2. Send Batch via Weaviate Client
+        if self._lite_mode:
+            self._flush_via_store(items)
+            return
+
+        # 2. Send Batch via Weaviate Client (Pro mode)
         try:
             # Weaviate v4 batch context
             with self.client.batch.dynamic() as batch:
@@ -142,6 +170,31 @@ class WeaviateBatchManager:
             if "shutdown" in msg or "closed" in msg:
                 return
             logger.error(f"❌ Batch Flush Error: {e}")
+
+    def _flush_via_store(self, items: List[Dict[str, Any]]):
+        """Lite-mode flush: route items through the VectorStore abstraction."""
+        from ..store import get_vector_store
+        try:
+            store = get_vector_store()
+        except Exception as e:
+            logger.error(f"❌ Lite store unavailable: {e}")
+            return
+        by_collection: Dict[str, List[Dict[str, Any]]] = {}
+        for item in items:
+            by_collection.setdefault(item["collection"], []).append({
+                "properties": item["properties"],
+                "uuid": item.get("uuid"),
+                "vector": item.get("vector"),
+            })
+        for collection, batch in by_collection.items():
+            try:
+                # Lite stores create tables lazily, but ensure the schema exists
+                # so writes don't fail with "table not found".
+                if not store.collection_exists(collection):
+                    store.ensure_collection(collection, properties=[])
+                store.insert_many(collection, batch)
+            except Exception as e:
+                logger.error(f"❌ Lite batch flush failed for '{collection}': {e}")
 
     # --- Legacy Python Worker Methods (Only used if Rust is missing) ---
     def _python_worker_loop(self):
