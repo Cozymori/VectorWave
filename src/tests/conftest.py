@@ -104,6 +104,22 @@ def weaviate_container():
     http_port = int(container.get_exposed_port(8080))
     grpc_port = int(container.get_exposed_port(50051))
 
+    # The "Serving weaviate" log line fires before the gRPC server is fully
+    # accepting traffic; poll the readiness endpoint to avoid a race on the
+    # first connection attempt.
+    import urllib.error
+    import urllib.request
+    ready_url = f"http://{host}:{http_port}/v1/.well-known/ready"
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(ready_url, timeout=1) as resp:
+                if resp.status == 200:
+                    break
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            pass
+        time.sleep(0.5)
+
     saved_env = {
         k: os.environ.get(k)
         for k in (

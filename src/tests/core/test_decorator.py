@@ -1,185 +1,176 @@
+"""End-to-end tests for the @vectorize decorator.
+
+These tests exercise the full decoration → trace → batch → Weaviate path. We
+configure the batch manager to flush almost immediately (BATCH_THRESHOLD=1,
+FLUSH_INTERVAL_SECONDS=0.1) so each call materialises in Weaviate within a
+second, then poll the collection to assert what landed there.
+"""
+import asyncio
+import json
+import time
+
 import pytest
-from unittest.mock import patch, MagicMock
-import inspect
-from weaviate.util import generate_uuid5
 
 from vectorwave.core.decorator import vectorize
-from vectorwave.models.db_config import WeaviateSettings
+from vectorwave.monitoring.tracer import trace_span
+from vectorwave.database.db import (
+    get_weaviate_client,
+    create_vectorwave_schema,
+    create_execution_schema,
+)
 
-from vectorwave.batch.batch import get_batch_manager as real_get_batch_manager
-from vectorwave.database.db import get_cached_client as real_get_cached_client
-from vectorwave.models.db_config import get_weaviate_settings as real_get_settings
+
+def _wait_for_count(coll, expected: int, timeout: float = 8.0) -> int:
+    """Polls until the collection has at least `expected` rows or times out."""
+    deadline = time.time() + timeout
+    last_count = -1
+    while time.time() < deadline:
+        last_count = len(coll.query.fetch_objects(limit=200).objects)
+        if last_count >= expected:
+            return last_count
+        time.sleep(0.1)
+    raise AssertionError(f"expected at least {expected} rows, got {last_count} after {timeout}s")
+
+
+def _read_all(coll):
+    return list(coll.iterator())
+
+
+def _clear_all_caches():
+    from vectorwave.models.db_config import get_weaviate_settings
+    from vectorwave.batch.batch import get_batch_manager
+    from vectorwave.database.db import get_cached_client
+    from vectorwave.vectorizer.factory import get_vectorizer
+    for fn in (get_weaviate_settings, get_batch_manager, get_cached_client, get_vectorizer):
+        fn.cache_clear()
+
+
+def _setup_env(monkeypatch, props_path: str):
+    """Common env setup: fast batch flush, point at the given custom_properties file."""
+    monkeypatch.setenv("CUSTOM_PROPERTIES_FILE_PATH", props_path)
+    monkeypatch.setenv("BATCH_THRESHOLD", "1")
+    monkeypatch.setenv("FLUSH_INTERVAL_SECONDS", "0.1")
+    _clear_all_caches()
+
+
+def _wipe_and_recreate_schemas(settings):
+    client = get_weaviate_client(settings)
+    try:
+        for name in (
+            settings.COLLECTION_NAME,
+            settings.EXECUTION_COLLECTION_NAME,
+            settings.GOLDEN_COLLECTION_NAME,
+            "VectorWaveTokenUsage",
+        ):
+            if client.collections.exists(name):
+                client.collections.delete(name)
+        create_vectorwave_schema(client, settings)
+        create_execution_schema(client, settings)
+    finally:
+        client.close()
 
 
 @pytest.fixture
-def mock_decorator_deps(monkeypatch):
-    """
-    Mocks dependencies for decorator.py (get_batch_manager, get_weaviate_settings)
-    """
-    # 1. Mock BatchManager
-    mock_batch_manager = MagicMock()
-    mock_batch_manager.add_object = MagicMock()
-    mock_get_batch_manager = MagicMock(return_value=mock_batch_manager)
-
-    # 2. Mock Settings
-    mock_custom_props = {
+def vectorize_e2e_env(weaviate_container, monkeypatch, tmp_path):
+    """E2E setup with custom_properties run_id/team/priority and run_id=test-run-abc as global."""
+    props_path = tmp_path / "test.weaviate_properties"
+    props_path.write_text(json.dumps({
         "run_id": {"data_type": "TEXT"},
         "team": {"data_type": "TEXT"},
-        "priority": {"data_type": "INT"}
-    }
-    mock_settings = WeaviateSettings(
-        COLLECTION_NAME="TestFunctions",
-        EXECUTION_COLLECTION_NAME="TestExecutions",
-        custom_properties=mock_custom_props,
-        global_custom_values={"run_id": "test-run-abc"}
-    )
-    mock_get_settings = MagicMock(return_value=mock_settings)
+        "priority": {"data_type": "INT"},
+        "user_id": {"data_type": "TEXT"},
+        "amount": {"data_type": "INT"},
+        "receipt_id": {"data_type": "TEXT"},
+    }))
+    monkeypatch.setenv("RUN_ID", "test-run-abc")
+    _setup_env(monkeypatch, str(props_path))
 
-    mock_client = MagicMock()
-    mock_get_client = MagicMock(return_value=mock_client)
+    from vectorwave.models.db_config import get_weaviate_settings
+    settings = get_weaviate_settings()
+    _wipe_and_recreate_schemas(settings)
 
-
-    # --- decorator.py ---
-    monkeypatch.setattr("vectorwave.core.decorator.get_batch_manager", mock_get_batch_manager)
-    monkeypatch.setattr("vectorwave.core.decorator.get_weaviate_settings", mock_get_settings)
-
-    # --- tracer.py ---
-    monkeypatch.setattr("vectorwave.monitoring.tracer.get_batch_manager", mock_get_batch_manager)
-    monkeypatch.setattr("vectorwave.monitoring.tracer.get_weaviate_settings", mock_get_settings)
-
-    # --- batch.py (tracer가 get_batch_manager()를 호출할 때 사용) ---
-    # WeaviateBatchManager.__init__이 실패하지 않도록 패치
-    monkeypatch.setattr("vectorwave.batch.batch.get_weaviate_client", mock_get_client)
-    monkeypatch.setattr("vectorwave.batch.batch.get_weaviate_settings", mock_get_settings)
-
-    # 5. Clear caches to ensure mocks are used
-    real_get_batch_manager.cache_clear()
-    real_get_cached_client.cache_clear()
-    real_get_settings.cache_clear()
-
-    return {
-        "get_batch": mock_get_batch_manager,
-        "get_settings": mock_get_settings,
-        "batch": mock_batch_manager,
-        "settings": mock_settings
-    }
+    yield settings
+    _clear_all_caches()
 
 
 @pytest.fixture
-def mock_decorator_deps_no_props(monkeypatch):
-    """
-    Fixture variant where settings.custom_properties is None
-    """
-    # 1. Mock BatchManager
-    mock_batch_manager = MagicMock()
-    mock_batch_manager.add_object = MagicMock()
-    mock_get_batch_manager = MagicMock(return_value=mock_batch_manager)
+def vectorize_e2e_env_no_props(weaviate_container, monkeypatch, tmp_path):
+    """E2E setup with no custom_properties file (path points at a nonexistent file)."""
+    monkeypatch.delenv("RUN_ID", raising=False)
+    _setup_env(monkeypatch, str(tmp_path / "does_not_exist.json"))
 
-    # 2. Mock Settings (custom_properties=None)
-    mock_settings = WeaviateSettings(
-        COLLECTION_NAME="TestFunctions",
-        EXECUTION_COLLECTION_NAME="TestExecutions",
-        custom_properties=None,  # <-- No properties loaded
-        global_custom_values=None  # <-- No globals
-    )
-    mock_get_settings = MagicMock(return_value=mock_settings)
+    from vectorwave.models.db_config import get_weaviate_settings
+    settings = get_weaviate_settings()
+    assert settings.custom_properties is None
+    _wipe_and_recreate_schemas(settings)
 
-    mock_client = MagicMock()
-    mock_get_client = MagicMock(return_value=mock_client)
-
-    monkeypatch.setattr("vectorwave.core.decorator.get_batch_manager", mock_get_batch_manager)
-    monkeypatch.setattr("vectorwave.core.decorator.get_weaviate_settings", mock_get_settings)
-    monkeypatch.setattr("vectorwave.monitoring.tracer.get_batch_manager", mock_get_batch_manager)
-    monkeypatch.setattr("vectorwave.monitoring.tracer.get_weaviate_settings", mock_get_settings)
-    monkeypatch.setattr("vectorwave.batch.batch.get_weaviate_client", mock_get_client)
-    monkeypatch.setattr("vectorwave.batch.batch.get_weaviate_settings", mock_get_settings)
-
-    # 5. Clear caches
-    real_get_batch_manager.cache_clear()
-    real_get_cached_client.cache_clear()
-    real_get_settings.cache_clear()
-
-    return {
-        "get_batch": mock_get_batch_manager,
-        "get_settings": mock_get_settings,
-        "batch": mock_batch_manager,
-        "settings": mock_settings
-    }
+    yield settings
+    _clear_all_caches()
 
 
-def test_vectorize_static_data_collection(mock_decorator_deps):
-    """
-    Case 1: Test if data is added once to 'VectorWaveFunctions' (static) when the decorator is loaded
-    """
-    mock_batch = mock_decorator_deps["batch"]
-    mock_settings = mock_decorator_deps["settings"]
+# ---------------------------------------------------------------------------
+# Static metadata: function definition is registered to VectorWaveFunctions
+# ---------------------------------------------------------------------------
 
-    @vectorize(
-        search_description="Test search desc",
-        sequence_narrative="Test sequence narr"
-    )
+@pytest.mark.e2e
+def test_vectorize_writes_function_metadata_to_weaviate(vectorize_e2e_env):
+    settings = vectorize_e2e_env
+
+    @vectorize(search_description="Test search desc", sequence_narrative="Test sequence narr")
     def my_test_function_static():
         """My test docstring"""
         pass
 
-    # --- ----------------- ---
-
-    # 1. Assert: get_batch_manager and get_weaviate_settings are called at load time
-    mock_decorator_deps["get_batch"].assert_called_once()
-    # (get_weaviate_settings might have already been called once during batch initialization,
-    # so check 'called' instead of 'call_count')
-    assert mock_decorator_deps["get_settings"].called
-
-    # 2. Assert: batch.add_object is called once
-    mock_batch.add_object.assert_called_once()
-
-    # 3. Assert: Check if the call arguments are for the 'VectorWaveFunctions' collection
-    args, kwargs = mock_batch.add_object.call_args
-
-    assert kwargs["collection"] == mock_settings.COLLECTION_NAME
-    assert kwargs["properties"]["function_name"] == "my_test_function_static"
-    assert kwargs["properties"]["docstring"] == "My test docstring"
-    assert "def my_test_function_static" in kwargs["properties"]["source_code"]
-    assert kwargs["properties"]["search_description"] == "Test search desc"
-    assert kwargs["properties"]["sequence_narrative"] == "Test sequence narr"
+    client = get_weaviate_client(settings)
+    try:
+        funcs = client.collections.get(settings.COLLECTION_NAME)
+        _wait_for_count(funcs, 1)
+        objs = _read_all(funcs)
+        assert len(objs) == 1
+        props = objs[0].properties
+        assert props["function_name"] == "my_test_function_static"
+        assert props["docstring"] == "My test docstring"
+        assert "def my_test_function_static" in props["source_code"]
+        assert props["search_description"] == "Test search desc"
+        assert props["sequence_narrative"] == "Test sequence narr"
+    finally:
+        client.close()
 
 
-def test_vectorize_dynamic_data_logging_success(mock_decorator_deps):
-    """
-    Case 2: Test if the decorated function adds a log to 'VectorWaveExecutions' (dynamic) on 'successful' execution
-    """
-    mock_batch = mock_decorator_deps["batch"]
-    mock_settings = mock_decorator_deps["settings"]
+# ---------------------------------------------------------------------------
+# Dynamic logs: each call lands in VectorWaveExecutions
+# ---------------------------------------------------------------------------
+
+@pytest.mark.e2e
+def test_vectorize_logs_successful_call_to_executions(vectorize_e2e_env):
+    settings = vectorize_e2e_env
 
     @vectorize(search_description="Test", sequence_narrative="Test")
-    def my_test_function_dynamic():
+    def my_success_function():
         return "Success"
 
-    result = my_test_function_dynamic()
+    assert my_success_function() == "Success"
 
-    # 1. Assert: Function returns the result normally
-    assert result == "Success"
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _wait_for_count(execs, 1)
+        objs = _read_all(execs)
+        assert len(objs) == 1
+        props = objs[0].properties
+        assert props["status"] == "SUCCESS"
+        assert props["error_message"] is None
+        assert props["duration_ms"] >= 0
+        assert props["function_name"] == "my_success_function"
+        # Global custom value populated from RUN_ID env
+        assert props["run_id"] == "test-run-abc"
+    finally:
+        client.close()
 
-    # 2. Assert: add_object is called 2 times in total (1 static + 1 dynamic)
-    assert mock_batch.add_object.call_count == 2
 
-    # 3. Assert: Check arguments of the last call (dynamic log)
-    args, kwargs = mock_batch.add_object.call_args
-
-    assert kwargs["collection"] == mock_settings.EXECUTION_COLLECTION_NAME
-    assert kwargs["properties"]["status"] == "SUCCESS"
-    assert kwargs["properties"]["error_message"] is None
-    assert kwargs["properties"]["duration_ms"] > 0
-    # Check if global_custom_values (run_id) were merged
-    assert kwargs["properties"]["run_id"] == "test-run-abc"
-
-
-def test_vectorize_dynamic_data_logging_failure(mock_decorator_deps):
-    """
-    Case 3: Test if the decorated function adds a 'status=ERROR' log on 'failed' execution
-    """
-    mock_batch = mock_decorator_deps["batch"]
-    mock_settings = mock_decorator_deps["settings"]
+@pytest.mark.e2e
+def test_vectorize_logs_failed_call_with_error_status(vectorize_e2e_env):
+    settings = vectorize_e2e_env
 
     @vectorize(search_description="FailTest", sequence_narrative="FailTest")
     def my_failing_function():
@@ -188,158 +179,215 @@ def test_vectorize_dynamic_data_logging_failure(mock_decorator_deps):
     with pytest.raises(ValueError, match="This is a test error"):
         my_failing_function()
 
-    # 1. Assert: add_object is called 2 times in total (1 static + 1 dynamic)
-    assert mock_batch.add_object.call_count == 2
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _wait_for_count(execs, 1)
+        objs = _read_all(execs)
+        assert len(objs) == 1
+        props = objs[0].properties
+        assert props["status"] == "ERROR"
+        assert "ValueError: This is a test error" in props["error_message"]
+        assert "Traceback" in props["error_message"]
+        assert props["run_id"] == "test-run-abc"
+    finally:
+        client.close()
 
-    # 2. Assert: Check arguments of the last call (dynamic log)
-    args, kwargs = mock_batch.add_object.call_args
 
-    assert kwargs["collection"] == mock_settings.EXECUTION_COLLECTION_NAME
-    assert kwargs["properties"]["status"] == "ERROR"
-    assert "ValueError: This is a test error" in kwargs["properties"]["error_message"]
-    assert "Traceback (most recent call last):" in kwargs["properties"]["error_message"]
-    assert kwargs["properties"]["run_id"] == "test-run-abc"
+# ---------------------------------------------------------------------------
+# Custom execution tags: function-specific tags merge with global tags
+# ---------------------------------------------------------------------------
 
+@pytest.mark.e2e
+def test_vectorize_merges_global_and_function_specific_tags(vectorize_e2e_env):
+    settings = vectorize_e2e_env
 
-def test_vectorize_dynamic_data_with_execution_tags(mock_decorator_deps):
-    """
-    Case 4: Test if execution logs correctly merge global tags (run_id) and
-    function-specific tags (team, priority) provided via **kwargs.
-    """
-    mock_batch = mock_decorator_deps["batch"]
-    mock_settings = mock_decorator_deps["settings"]
-
-    # 1. Arrange: Define a function with function-specific execution tags
     @vectorize(
         search_description="Test with specific tags",
         sequence_narrative="Tags should be merged",
-        team="backend",  # <-- Function-specific tag
-        priority=1  # <-- Function-specific tag
+        team="backend",
+        priority=1,
     )
     def my_tagged_function():
         return "Tagged success"
 
-    # 2. Act: Execute the decorated function
-    result = my_tagged_function()
+    assert my_tagged_function() == "Tagged success"
 
-    # 3. Assert: Basic execution
-    assert result == "Tagged success"
-    # (1 static call + 1 dynamic call)
-    assert mock_batch.add_object.call_count == 2
-
-    # 4. Assert: Check the properties of the dynamic log (the last call)
-    args, kwargs = mock_batch.add_object.call_args
-
-    assert kwargs["collection"] == mock_settings.EXECUTION_COLLECTION_NAME
-    assert kwargs["properties"]["status"] == "SUCCESS"
-
-    # 4a. Verify Global Tag (from fixture)
-    assert kwargs["properties"]["run_id"] == "test-run-abc"
-
-    # 4b. Verify Function-Specific Tags (from @vectorize)
-    assert kwargs["properties"]["team"] == "backend"
-    assert kwargs["properties"]["priority"] == 1
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _wait_for_count(execs, 1)
+        props = _read_all(execs)[0].properties
+        assert props["status"] == "SUCCESS"
+        assert props["run_id"] == "test-run-abc"
+        assert props["team"] == "backend"
+        assert props["priority"] == 1
+    finally:
+        client.close()
 
 
-def test_vectorize_execution_tags_override_global_tags(mock_decorator_deps):
-    """
-    Case 5: Test if a function-specific tag (e.g., 'run_id')
-    correctly overrides a global tag with the same name.
-    """
-    mock_batch = mock_decorator_deps["batch"]
+@pytest.mark.e2e
+def test_vectorize_function_specific_tag_overrides_global(vectorize_e2e_env):
+    settings = vectorize_e2e_env
 
-    # 1. Arrange: Define function where 'run_id' will override the global value
-    # The fixture provides a global "run_id": "test-run-abc"
     @vectorize(
         search_description="Test override",
         sequence_narrative="Next",
-        run_id="override-run-xyz"  # <-- This should WIN against "test-run-abc"
+        run_id="override-run-xyz",
     )
     def my_override_function():
-        pass
+        return None
 
-    # 2. Act
     my_override_function()
 
-    # 3. Assert
-    args, kwargs = mock_batch.add_object.call_args
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _wait_for_count(execs, 1)
+        props = _read_all(execs)[0].properties
+        assert props["run_id"] == "override-run-xyz"
+    finally:
+        client.close()
 
-    # Verify that the function-specific 'run_id' overrode the global one
-    assert kwargs["properties"]["run_id"] == "override-run-xyz"
 
+@pytest.mark.e2e
+def test_vectorize_filters_unknown_tags_not_in_custom_properties(vectorize_e2e_env):
+    """A tag absent from custom_properties is dropped before reaching Weaviate."""
+    settings = vectorize_e2e_env
 
-def test_vectorize_filters_invalid_execution_tags(mock_decorator_deps):
-    """
-    Case 6: Test that the decorator filters out execution tags that are
-    NOT in settings.custom_properties and only logs the valid tags.
-    (This test intentionally does not check the warning output mechanism)
-    """
-    mock_batch = mock_decorator_deps["batch"]
-    mock_settings = mock_decorator_deps["settings"]
-
-    # 1. Arrange: Define function with valid tags ('team', 'priority')
-    # and one invalid tag ('unknown_tag')
-    # (Fixture defines 'run_id', 'team', 'priority' as custom_properties)
     @vectorize(
         search_description="Test tag filtering",
         sequence_narrative="Next",
-        team="data-science",  # <-- Valid
-        priority=2,  # <-- Valid
-        unknown_tag="should-be-ignored"  # <-- INVALID
+        team="data-science",
+        priority=2,
+        unknown_tag="should-be-ignored",
     )
     def my_mixed_tags_function():
-        pass
+        return None
 
-    # 2. Act
-    my_mixed_tags_function()  # Run the wrapper
+    my_mixed_tags_function()
 
-    # 3. Assert: Check final execution log properties
-    # (We check the *last* call, which is the dynamic log)
-    args, kwargs = mock_batch.add_object.call_args
-    props = kwargs["properties"]
-
-    assert kwargs["collection"] == mock_settings.EXECUTION_COLLECTION_NAME
-
-    # 3a. Valid global tag should exist
-    assert props["run_id"] == "test-run-abc"
-
-    # 3b. Valid function-specific tags should exist
-    assert props["team"] == "data-science"
-    assert props["priority"] == 2
-
-    # 3c. Invalid tag should NOT exist
-    assert "unknown_tag" not in props
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _wait_for_count(execs, 1)
+        props = _read_all(execs)[0].properties
+        assert props["run_id"] == "test-run-abc"
+        assert props["team"] == "data-science"
+        assert props["priority"] == 2
+        assert "unknown_tag" not in props
+    finally:
+        client.close()
 
 
-def test_vectorize_handles_tags_when_no_props_file(mock_decorator_deps_no_props):
-    """
-    Case 7: Test that if settings.custom_properties is None,
-    ALL execution_tags are ignored.
-    (This test intentionally does not check the warning output mechanism)
-    """
-    mock_batch = mock_decorator_deps_no_props["batch"]
-    mock_settings = mock_decorator_deps_no_props["settings"]
+@pytest.mark.e2e
+def test_vectorize_drops_all_tags_when_no_properties_file(vectorize_e2e_env_no_props):
+    """With no custom_properties configured, every passed tag is filtered out."""
+    settings = vectorize_e2e_env_no_props
 
-    # 1. Arrange
     @vectorize(
         search_description="Test no props",
         sequence_narrative="Next",
-        team="should-be-ignored"  # <-- Invalid (because no file)
+        team="should-be-ignored",
     )
     def my_no_props_function():
-        pass
+        return None
 
-    # 2. Act
-    my_no_props_function()  # Run wrapper
+    my_no_props_function()
 
-    # 3. Assert: Check final execution log properties
-    args, kwargs = mock_batch.add_object.call_args
-    props = kwargs["properties"]
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _wait_for_count(execs, 1)
+        props = _read_all(execs)[0].properties
+        assert props["status"] == "SUCCESS"
+        # `team` is not even a property in the schema, so it cannot leak through
+        assert "team" not in props
+    finally:
+        client.close()
 
-    assert kwargs["collection"] == mock_settings.EXECUTION_COLLECTION_NAME
 
-    # 3a. Basic properties should still exist
-    assert props["status"] == "SUCCESS"
+# ---------------------------------------------------------------------------
+# Async @vectorize coverage (moved from monitoring/test_async_trace.py)
+# ---------------------------------------------------------------------------
 
-    # 3b. The tag should NOT exist
-    assert "team" not in props
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_vectorize_logs_successful_async_call(vectorize_e2e_env):
+    settings = vectorize_e2e_env
+
+    @vectorize(
+        search_description="Async test",
+        sequence_narrative="Next",
+        team="async-team",
+    )
+    async def my_async_vectorized_func(x):
+        await asyncio.sleep(0.01)
+        return f"async result {x}"
+
+    result = await my_async_vectorized_func(x=5)
+    assert result == "async result 5"
+
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _wait_for_count(execs, 1)
+        props = _read_all(execs)[0].properties
+        assert props["status"] == "SUCCESS"
+        assert props["function_name"] == "my_async_vectorized_func"
+        assert props["duration_ms"] > 0
+        assert props["run_id"] == "test-run-abc"
+        assert props["team"] == "async-team"
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_async_vectorize_root_with_async_child_spans(vectorize_e2e_env):
+    """Root @vectorize plus two @trace_span async children should land 3 rows
+    that share the same trace_id."""
+    settings = vectorize_e2e_env
+
+    @trace_span(attributes_to_capture=["user_id", "amount"])
+    async def async_step_1_validate(user_id: str, amount: int):
+        await asyncio.sleep(0.01)
+        return True
+
+    @trace_span(attributes_to_capture=["user_id", "receipt_id"])
+    async def async_step_2_send_receipt(user_id: str, receipt_id: str):
+        await asyncio.sleep(0.01)
+        return "sent"
+
+    @vectorize(
+        search_description="Async payment workflow",
+        sequence_narrative="root + 2 spans",
+        team="billing",
+    )
+    async def async_process_payment(user_id: str, amount: int):
+        await async_step_1_validate(user_id=user_id, amount=amount)
+        receipt_id = f"async_receipt_{user_id}"
+        await async_step_2_send_receipt(user_id=user_id, receipt_id=receipt_id)
+        return {"status": "success", "receipt_id": receipt_id}
+
+    result = await async_process_payment("useraab", 500)
+    assert result["status"] == "success"
+
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _wait_for_count(execs, 3)
+        props_by_name = {o.properties["function_name"]: o.properties for o in _read_all(execs)}
+        assert set(props_by_name.keys()) == {
+            "async_step_1_validate",
+            "async_step_2_send_receipt",
+            "async_process_payment",
+        }
+        trace_ids = {p["trace_id"] for p in props_by_name.values()}
+        assert len(trace_ids) == 1, f"expected one shared trace_id, got {trace_ids}"
+        assert props_by_name["async_step_1_validate"]["user_id"] == "useraab"
+        assert props_by_name["async_step_1_validate"]["amount"] == 500
+        assert props_by_name["async_step_2_send_receipt"]["receipt_id"] == "async_receipt_useraab"
+        assert props_by_name["async_process_payment"]["team"] == "billing"
+    finally:
+        client.close()

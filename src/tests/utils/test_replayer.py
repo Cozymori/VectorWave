@@ -1,290 +1,292 @@
-import pytest
-import json
+"""End-to-end tests for VectorWaveReplayer.
+
+Logs are seeded directly into Weaviate and the replayer is exercised against
+real fetch/insert/update paths. Function names are deliberately single tokens
+(no underscores) because Weaviate's default `word` tokenization on TEXT
+properties affects equality filters.
+"""
 import asyncio
-import inspect
-from unittest.mock import MagicMock, patch
+import json
+
+import pytest
+from datetime import datetime, timezone
+from uuid import uuid4
+
 from vectorwave.utils.replayer import VectorWaveReplayer
-from vectorwave.models.db_config import WeaviateSettings
+from vectorwave.database.db import (
+    create_execution_schema,
+    create_golden_dataset_schema,
+    get_weaviate_client,
+)
 
 
-# --- Module-level helpers for mock injection tests ---
+# ---------------------------------------------------------------------------
+# Module-level functions exercised by the replayer
+# ---------------------------------------------------------------------------
 
-def _external_service(value):
-    raise RuntimeError("Real _external_service must not be called in tests")
-
-
-def _func_calling_external(x):
-    return _external_service(x)
+def radd(a, b):
+    return a + b
 
 
-# --- 1. Mock Fixtures (Mock Environment Setup) ---
+def rbuggy(a, b):
+    """Intentionally wrong implementation: produces a regression."""
+    return a + b + 100
+
+
+def rgreet(msg):
+    return f"Hello {msg}"
+
+
+def rcalc(a):
+    return a * 10
+
+
+async def rasync(a, b):
+    await asyncio.sleep(0.001)
+    return a + b
+
+
+def _ext(value):
+    raise RuntimeError("Real _ext must not be called in tests; it should be mocked")
+
+
+def rcallsx(x):
+    return _ext(x)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+def _clear_all_caches():
+    from vectorwave.models.db_config import get_weaviate_settings
+    from vectorwave.batch.batch import get_batch_manager
+    from vectorwave.database.db import get_cached_client
+    from vectorwave.vectorizer.factory import get_vectorizer
+    for fn in (get_weaviate_settings, get_batch_manager, get_cached_client, get_vectorizer):
+        fn.cache_clear()
+
 
 @pytest.fixture
-def mock_replayer_deps(monkeypatch):
-    """
-    Mocks the DB client and settings used by the Replayer (Default Setup).
-    """
-    # Settings Mock
-    mock_settings = MagicMock()
-    mock_settings.EXECUTION_COLLECTION_NAME = "VectorWaveExecutions"
-    mock_settings.GOLDEN_COLLECTION_NAME = "VectorWaveGoldenDataset"
+def replayer_e2e_env(weaviate_container, monkeypatch, tmp_path):
+    """E2E setup: register input-arg properties as custom_properties so they survive
+    the schema's strict typing, then create fresh executions + golden collections."""
+    props_path = tmp_path / "test.weaviate_properties"
+    props_path.write_text(json.dumps({
+        "a": {"data_type": "INT"},
+        "b": {"data_type": "INT"},
+        "x": {"data_type": "INT"},
+        "msg": {"data_type": "TEXT"},
+        "team": {"data_type": "TEXT"},
+        "priority": {"data_type": "INT"},
+    }))
+    monkeypatch.setenv("CUSTOM_PROPERTIES_FILE_PATH", str(props_path))
+    monkeypatch.setenv("BATCH_THRESHOLD", "1")
+    monkeypatch.setenv("FLUSH_INTERVAL_SECONDS", "0.1")
+    _clear_all_caches()
 
-    # Weaviate Client & Collection Mock
-    mock_client = MagicMock()
-    mock_collection = MagicMock()
-    mock_client.collections.get.return_value = mock_collection
+    from vectorwave.models.db_config import get_weaviate_settings
+    settings = get_weaviate_settings()
+    client = get_weaviate_client(settings)
+    try:
+        for name in (
+            settings.COLLECTION_NAME,
+            settings.EXECUTION_COLLECTION_NAME,
+            settings.GOLDEN_COLLECTION_NAME,
+            "VectorWaveTokenUsage",
+        ):
+            if client.collections.exists(name):
+                client.collections.delete(name)
+        create_execution_schema(client, settings)
+        create_golden_dataset_schema(client, settings)
+    finally:
+        client.close()
 
-    # Query Response Mock (Default: empty list)
-    mock_query = MagicMock()
-    mock_query.fetch_objects.return_value = MagicMock(objects=[])
-    mock_collection.query = mock_query
+    yield settings
+    _clear_all_caches()
 
-    # Data Operation Mock
-    mock_data = MagicMock()
-    mock_collection.data = mock_data
 
-    # Apply Patches
-    monkeypatch.setattr("vectorwave.utils.replayer.get_cached_client", MagicMock(return_value=mock_client))
-    monkeypatch.setattr("vectorwave.utils.replayer.get_weaviate_settings", MagicMock(return_value=mock_settings))
-
-    return {
-        "collection": mock_collection,
-        "query": mock_query,
-        "data": mock_data
+def _seed_exec_log(coll, *, function_name, inputs, return_value, status="SUCCESS"):
+    encoded_return = json.dumps(return_value)
+    props = {
+        "function_uuid": str(uuid4()),
+        "function_name": function_name,
+        "status": status,
+        "duration_ms": 1.0,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "return_value": encoded_return,
     }
+    props.update(inputs)
+    return coll.data.insert(properties=props)
 
-@pytest.fixture
-def mock_replayer_deps_v2(monkeypatch):
-    """
-    Mock fixture separating Golden and Execution collections for Priority Testing.
-    """
-    # Settings
-    mock_settings = WeaviateSettings(
-        EXECUTION_COLLECTION_NAME="Executions",
-        GOLDEN_COLLECTION_NAME="GoldenData"
-    )
-    mock_get_settings = MagicMock(return_value=mock_settings)
 
-    # Client & Collections
-    mock_client = MagicMock()
-    mock_exec_col = MagicMock()
-    mock_golden_col = MagicMock()
-
-    def get_collection_side_effect(name):
-        if name == "Executions": return mock_exec_col
-        if name == "GoldenData": return mock_golden_col
-        return MagicMock()
-
-    mock_client.collections.get.side_effect = get_collection_side_effect
-    mock_get_client = MagicMock(return_value=mock_client)
-
-    monkeypatch.setattr("vectorwave.utils.replayer.get_cached_client", mock_get_client)
-    monkeypatch.setattr("vectorwave.utils.replayer.get_weaviate_settings", mock_get_settings)
-
-    return {
-        "golden_col": mock_golden_col,
-        "exec_col": mock_exec_col
-    }
-
-def create_mock_log(uuid_str, inputs, return_value):
-    """Mimics a log object retrieved from the database."""
-    mock_obj = MagicMock()
-    mock_obj.uuid = uuid_str
-    props = inputs.copy()
-    props["return_value"] = json.dumps(return_value) if not isinstance(return_value, str) else return_value
-    props["timestamp_utc"] = "2023-01-01T00:00:00Z"
-    mock_obj.properties = props
-    return mock_obj
-
-# --- 2. Test Cases ---
-
-def test_replay_success_match(mock_replayer_deps):
-    """[Case 1] Successful Pass"""
-    replayer = VectorWaveReplayer()
-    mock_logs = [create_mock_log("uuid-1", {"a": 1, "b": 2}, 3)]
-    mock_replayer_deps["query"].fetch_objects.return_value.objects = mock_logs
-
-    mock_func = MagicMock(return_value=3)
-    mock_func.__signature__ = inspect.Signature([
-        inspect.Parameter('a', inspect.Parameter.POSITIONAL_OR_KEYWORD),
-        inspect.Parameter('b', inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ])
-
-    with patch("vectorwave.utils.replayer.importlib.import_module") as mock_import:
-        mock_module = MagicMock()
-        setattr(mock_module, "add", mock_func)
-        mock_import.return_value = mock_module
-
-        result = replayer.replay("my_module.add", limit=1)
-
-    assert result["passed"] == 1
-    assert result["failed"] == 0
-    mock_func.assert_called_with(a=1, b=2)
-
-def test_replay_failure_mismatch(mock_replayer_deps):
-    """[Case 2] Failure: Regression check"""
-    replayer = VectorWaveReplayer()
-    mock_logs = [create_mock_log("uuid-2", {"a": 1, "b": 2}, 3)]
-    mock_replayer_deps["query"].fetch_objects.return_value.objects = mock_logs
-
-    mock_func = MagicMock(return_value=99) # Bug
-    mock_func.__signature__ = inspect.Signature([
-        inspect.Parameter('a', inspect.Parameter.POSITIONAL_OR_KEYWORD),
-        inspect.Parameter('b', inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ])
-
-    with patch("vectorwave.utils.replayer.importlib.import_module") as mock_import:
-        mock_module = MagicMock()
-        setattr(mock_module, "add", mock_func)
-        mock_import.return_value = mock_module
-        result = replayer.replay("my_module.add")
-
-    assert result["passed"] == 0
-    assert result["failed"] == 1
-    assert result["failures"][0]["expected"] == 3
-    assert result["failures"][0]["actual"] == 99
-
-def test_replay_update_baseline(mock_replayer_deps):
-    """[Case 3] Update Baseline"""
-    replayer = VectorWaveReplayer()
-    mock_logs = [create_mock_log("uuid-3", {"msg": "Hi"}, "Old")]
-    mock_replayer_deps["query"].fetch_objects.return_value.objects = mock_logs
-
-    mock_func = MagicMock(return_value="New")
-    mock_func.__signature__ = inspect.Signature([
-        inspect.Parameter('msg', inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ])
-
-    with patch("vectorwave.utils.replayer.importlib.import_module") as mock_import:
-        mock_module = MagicMock()
-        setattr(mock_module, "greet", mock_func)
-        mock_import.return_value = mock_module
-        result = replayer.replay("my_module.greet", update_baseline=True)
-
-    assert result["updated"] == 1
-    mock_replayer_deps["data"].update.assert_called_once_with(
-        uuid="uuid-3",
-        properties={"return_value": '"New"'}
+def _seed_golden(coll, *, function_name, original_uuid, return_value):
+    return coll.data.insert(
+        properties={
+            "original_uuid": original_uuid,
+            "function_name": function_name,
+            "return_value": json.dumps(return_value),
+            "note": "",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "tags": [],
+        },
+        vector=[0.0] * 8,
     )
 
-def test_replay_argument_filtering(mock_replayer_deps):
-    """[Case 4] Argument Filtering"""
-    replayer = VectorWaveReplayer()
-    inputs = {"a": 10, "team": "billing", "priority": 1}
-    mock_logs = [create_mock_log("uuid-4", inputs, 100)]
-    mock_replayer_deps["query"].fetch_objects.return_value.objects = mock_logs
 
-    mock_func = MagicMock(return_value=100)
-    mock_func.__signature__ = inspect.Signature([
-        inspect.Parameter('a', inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ])
+# ---------------------------------------------------------------------------
+# E2E tests
+# ---------------------------------------------------------------------------
 
-    with patch("vectorwave.utils.replayer.importlib.import_module") as mock_import:
-        mock_module = MagicMock()
-        setattr(mock_module, "calc", mock_func)
-        mock_import.return_value = mock_module
-        replayer.replay("my_module.calc")
+@pytest.mark.e2e
+def test_replay_passes_when_outputs_match(replayer_e2e_env):
+    settings = replayer_e2e_env
+    client = get_weaviate_client(settings)
+    try:
+        exec_col = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _seed_exec_log(exec_col, function_name="radd", inputs={"a": 1, "b": 2}, return_value=3)
 
-    mock_func.assert_called_once_with(a=10)
-
-def test_replay_async_function_execution_fixed(mock_replayer_deps):
-    """[Case 5] Async Function Test"""
-    replayer = VectorWaveReplayer()
-    inputs = {"a": 1, "b": 2}
-    expected_result = 3
-    mock_logs = [create_mock_log("uuid-async-1", inputs, expected_result)]
-    mock_replayer_deps["query"].fetch_objects.return_value.objects = mock_logs
-
-    async def real_async_add(a, b):
-        await asyncio.sleep(0.001)
-        return a + b
-
-    setattr(real_async_add, '__signature__', inspect.Signature([
-        inspect.Parameter('a', inspect.Parameter.POSITIONAL_OR_KEYWORD),
-        inspect.Parameter('b', inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]))
-
-    mock_module = MagicMock()
-    mock_module.async_add = real_async_add
-
-    with patch("vectorwave.utils.replayer.importlib.import_module", return_value=mock_module):
-        result = replayer.replay("my_module.async_add", limit=1)
-
-    assert result["passed"] == 1
-    assert result["failed"] == 0
-
-def test_replay_fetches_golden_first(mock_replayer_deps_v2):
-    """
-    [Case 6] Test if Replayer prioritizes fetching Golden Data
-    """
-    from vectorwave.utils.replayer import VectorWaveReplayer
-
-    # Arrange
-    # 1. Setup one Golden Data entry
-    golden_obj = MagicMock()
-    golden_obj.uuid = "golden-uuid"
-    golden_obj.properties = {"original_uuid": "orig-1", "return_value": "3"}
-    mock_replayer_deps_v2["golden_col"].query.fetch_objects.return_value.objects = [golden_obj]
-
-    # Retrieve original log (to get input values)
-    orig_log = MagicMock()
-    orig_log.properties = {"a": 1, "b": 2}
-    mock_replayer_deps_v2["exec_col"].query.fetch_object_by_id.return_value = orig_log
-
-    # 2. Leave Standard Data empty
-    mock_replayer_deps_v2["exec_col"].query.fetch_objects.return_value.objects = []
-
-    # Function Mock
-    mock_func = MagicMock(return_value=3)
-    mock_func.__signature__ = inspect.Signature([
-        inspect.Parameter('a', inspect.Parameter.POSITIONAL_OR_KEYWORD),
-        inspect.Parameter('b', inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ])
-
-    # Act
-    replayer = VectorWaveReplayer()
-    with patch("vectorwave.utils.replayer.importlib.import_module") as mock_import:
-        mock_module = MagicMock()
-        setattr(mock_module, "add", mock_func)
-        mock_import.return_value = mock_module
-
-        result = replayer.replay("mod.add", limit=10)
-
-    # Assert
-    assert result["total"] == 1
-    # Verify that the Golden Collection was queried
-    mock_replayer_deps_v2["golden_col"].query.fetch_objects.assert_called_once()
-    # Verify that fetch_object_by_id was called to retrieve the original log
-    mock_replayer_deps_v2["exec_col"].query.fetch_object_by_id.assert_called_with("orig-1")
+        result = VectorWaveReplayer().replay("tests.utils.test_replayer.radd", limit=1)
+        assert result["total"] == 1
+        assert result["passed"] == 1
+        assert result["failed"] == 0
+    finally:
+        client.close()
 
 
-def test_replay_with_mocks_return_value(mock_replayer_deps):
-    """[Case 7] mocks return_value: _external_service patched to return 42"""
-    replayer = VectorWaveReplayer()
-    mock_logs = [create_mock_log("uuid-mock-1", {"x": 10}, 42)]
-    mock_replayer_deps["query"].fetch_objects.return_value.objects = mock_logs
+@pytest.mark.e2e
+def test_replay_detects_regression(replayer_e2e_env):
+    settings = replayer_e2e_env
+    client = get_weaviate_client(settings)
+    try:
+        exec_col = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _seed_exec_log(exec_col, function_name="rbuggy", inputs={"a": 1, "b": 2}, return_value=3)
 
-    result = replayer.replay(
-        "tests.utils.test_replayer._func_calling_external",
-        limit=1,
-        mocks={"tests.utils.test_replayer._external_service": {"return_value": 42}}
-    )
+        result = VectorWaveReplayer().replay("tests.utils.test_replayer.rbuggy", limit=1)
+        assert result["total"] == 1
+        assert result["passed"] == 0
+        assert result["failed"] == 1
+        failure = result["failures"][0]
+        assert failure["expected"] == 3
+        assert failure["actual"] == 103
+    finally:
+        client.close()
 
-    assert result["passed"] == 1
-    assert result["failed"] == 0
+
+@pytest.mark.e2e
+def test_replay_update_baseline_writes_new_value(replayer_e2e_env):
+    settings = replayer_e2e_env
+    client = get_weaviate_client(settings)
+    try:
+        exec_col = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        log_uuid = str(_seed_exec_log(
+            exec_col, function_name="rgreet", inputs={"msg": "World"}, return_value="OldGreeting"
+        ))
+
+        result = VectorWaveReplayer().replay(
+            "tests.utils.test_replayer.rgreet", update_baseline=True
+        )
+        assert result["updated"] == 1
+
+        updated = exec_col.query.fetch_object_by_id(log_uuid)
+        assert json.loads(updated.properties["return_value"]) == "Hello World"
+    finally:
+        client.close()
 
 
-def test_replay_with_mocks_side_effect(mock_replayer_deps):
-    """[Case 8] mocks side_effect: _external_service patched with lambda v: v * 2"""
-    replayer = VectorWaveReplayer()
-    mock_logs = [create_mock_log("uuid-mock-2", {"x": 7}, 14)]
-    mock_replayer_deps["query"].fetch_objects.return_value.objects = mock_logs
+@pytest.mark.e2e
+def test_replay_filters_extra_arguments_to_function_signature(replayer_e2e_env):
+    """Properties on the log that aren't in the function signature must be ignored."""
+    settings = replayer_e2e_env
+    client = get_weaviate_client(settings)
+    try:
+        exec_col = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _seed_exec_log(
+            exec_col,
+            function_name="rcalc",
+            inputs={"a": 10, "team": "billing", "priority": 1},
+            return_value=100,
+        )
 
-    result = replayer.replay(
-        "tests.utils.test_replayer._func_calling_external",
-        limit=1,
-        mocks={"tests.utils.test_replayer._external_service": {"side_effect": lambda v: v * 2}}
-    )
+        result = VectorWaveReplayer().replay("tests.utils.test_replayer.rcalc", limit=1)
+        assert result["total"] == 1
+        assert result["passed"] == 1
+    finally:
+        client.close()
 
-    assert result["passed"] == 1
-    assert result["failed"] == 0
+
+@pytest.mark.e2e
+def test_replay_handles_async_function(replayer_e2e_env):
+    settings = replayer_e2e_env
+    client = get_weaviate_client(settings)
+    try:
+        exec_col = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _seed_exec_log(exec_col, function_name="rasync", inputs={"a": 1, "b": 2}, return_value=3)
+
+        result = VectorWaveReplayer().replay("tests.utils.test_replayer.rasync", limit=1)
+        assert result["total"] == 1
+        assert result["passed"] == 1
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+def test_replay_loads_golden_dataset_entries(replayer_e2e_env):
+    """A Golden Dataset entry resolves its inputs from the referenced execution log."""
+    settings = replayer_e2e_env
+    client = get_weaviate_client(settings)
+    try:
+        exec_col = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        golden_col = client.collections.get(settings.GOLDEN_COLLECTION_NAME)
+
+        ref_uuid = str(_seed_exec_log(
+            exec_col, function_name="radd", inputs={"a": 5, "b": 7}, return_value=12
+        ))
+        _seed_golden(golden_col, function_name="radd", original_uuid=ref_uuid, return_value=12)
+
+        # Limit=1 keeps the run focused on the Golden entry that comes first.
+        result = VectorWaveReplayer().replay("tests.utils.test_replayer.radd", limit=1)
+        assert result["total"] == 1
+        assert result["passed"] == 1
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+def test_replay_with_mocks_return_value(replayer_e2e_env):
+    """`mocks={target: {return_value: V}}` patches a dependency for the replay run."""
+    settings = replayer_e2e_env
+    client = get_weaviate_client(settings)
+    try:
+        exec_col = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _seed_exec_log(exec_col, function_name="rcallsx", inputs={"x": 10}, return_value=42)
+
+        result = VectorWaveReplayer().replay(
+            "tests.utils.test_replayer.rcallsx",
+            limit=1,
+            mocks={"tests.utils.test_replayer._ext": {"return_value": 42}},
+        )
+        assert result["passed"] == 1
+        assert result["failed"] == 0
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+def test_replay_with_mocks_side_effect(replayer_e2e_env):
+    """`mocks={target: {side_effect: callable}}` is honored for input-dependent dependencies."""
+    settings = replayer_e2e_env
+    client = get_weaviate_client(settings)
+    try:
+        exec_col = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _seed_exec_log(exec_col, function_name="rcallsx", inputs={"x": 7}, return_value=14)
+
+        result = VectorWaveReplayer().replay(
+            "tests.utils.test_replayer.rcallsx",
+            limit=1,
+            mocks={"tests.utils.test_replayer._ext": {"side_effect": lambda v: v * 2}},
+        )
+        assert result["passed"] == 1
+        assert result["failed"] == 0
+    finally:
+        client.close()

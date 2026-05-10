@@ -1,372 +1,313 @@
-import pytest
-from unittest.mock import patch, MagicMock, call
+"""End-to-end tests for the semantic-cache path of @vectorize.
+
+The first call seeds Weaviate with the input vector + return value, the second
+call vectorises the same input, finds the seeded row via near_vector, and
+returns the cached value without re-executing the function. We use a local
+HuggingFace vectorizer so no OpenAI key is required.
+"""
 import asyncio
 import json
+import time
 
-# Import the core components to test
+import pytest
+
 from vectorwave.core.decorator import vectorize
-from vectorwave.models.db_config import WeaviateSettings
-# [MODIFIED: Reflecting the correct path]
-from vectorwave.utils.return_caching_utils import _check_and_return_cached_result
-
-# Import all real functions needed for mocking the cache
-from vectorwave.batch.batch import get_batch_manager as real_get_batch_manager
-from vectorwave.database.db import get_cached_client as real_get_cached_client
-from vectorwave.models.db_config import get_weaviate_settings as real_get_settings
-from vectorwave.vectorizer.factory import get_vectorizer as real_get_vectorizer
+from vectorwave.database.db import (
+    create_golden_dataset_schema,
+    create_vectorwave_schema,
+    create_execution_schema,
+    get_weaviate_client,
+)
 from vectorwave.monitoring.tracer import _create_input_vector_data
 
 
-# --- Fixture Setup ---
-
-@pytest.fixture
-def mock_caching_deps(monkeypatch):
-    """
-    Mocks core dependencies for semantic caching testing.
-    Mocking path: vectorwave.utils.return_caching_utils
-    """
-    # 1. Mock BatchManager
-    mock_batch_manager = MagicMock()
-    mock_batch_manager.add_object = MagicMock()
-    mock_get_batch_manager = MagicMock(return_value=mock_batch_manager)
-
-    # 2. Mock Vectorizer
-    mock_vectorizer = MagicMock()
-    mock_vectorizer.embed.return_value = [0.1, 0.2, 0.3]
-    mock_get_vectorizer = MagicMock(return_value=mock_vectorizer)
-
-    # 3. Mock Settings
-    mock_settings = WeaviateSettings(
-        COLLECTION_NAME="TestFunctions",
-        EXECUTION_COLLECTION_NAME="TestExecutions",
-        GOLDEN_COLLECTION_NAME="TestGolden",  # Ensure this is set
-        global_custom_values={"run_id": "test-run-cache"},
-        sensitive_keys={"secret_key"}
-    )
-    mock_get_settings = MagicMock(return_value=mock_settings)
-
-    # 4. Mock Weaviate Client (Crucial Fix)
-    mock_client = MagicMock()
-
-    # Setup mock for Golden Dataset query chain:
-    # client.collections.get().query.near_vector() -> returns empty objects list by default
-    mock_collection = MagicMock()
-    mock_query = MagicMock()
-    mock_response = MagicMock()
-    mock_response.objects = []  # Default to no golden hit
-
-    mock_query.near_vector.return_value = mock_response
-    mock_collection.query = mock_query
-    mock_client.collections.get.return_value = mock_collection
-
-    mock_get_client = MagicMock(return_value=mock_client)
-
-    # 5. Mock DB Search (Standard Cache)
-    mock_search_similar_execution = MagicMock(return_value=None)
-
-    # --- Apply Mocking ---
-
-    MOCK_PATH = "vectorwave.utils.return_caching_utils"
-
-    # [FIX] Mock get_cached_client in return_caching_utils
-    monkeypatch.setattr(f"{MOCK_PATH}.get_cached_client", mock_get_client)
-
-    monkeypatch.setattr(f"{MOCK_PATH}.get_weaviate_settings", mock_get_settings)
-    monkeypatch.setattr(f"{MOCK_PATH}.get_vectorizer", mock_get_vectorizer)
-    monkeypatch.setattr(f"{MOCK_PATH}.search_similar_execution", mock_search_similar_execution)
-
-    # Core/Decorator Dependencies
-    monkeypatch.setattr("vectorwave.core.decorator.get_batch_manager", mock_get_batch_manager)
-    monkeypatch.setattr("vectorwave.core.decorator.get_weaviate_settings", mock_get_settings)
-    monkeypatch.setattr("vectorwave.core.decorator.get_vectorizer", mock_get_vectorizer)
-
-    # Tracer Dependencies
-    monkeypatch.setattr("vectorwave.monitoring.tracer.get_batch_manager", mock_get_batch_manager)
-    monkeypatch.setattr("vectorwave.monitoring.tracer.get_weaviate_settings", mock_get_settings)
-    monkeypatch.setattr("vectorwave.monitoring.tracer.get_vectorizer", mock_get_vectorizer)
-
-    # Batch Dependencies
-    monkeypatch.setattr("vectorwave.batch.batch.get_weaviate_client", mock_get_client)
-    monkeypatch.setattr("vectorwave.batch.batch.get_weaviate_settings", mock_get_settings)
-
-    # Clear caches
-    real_get_batch_manager.cache_clear()
-    real_get_cached_client.cache_clear()
-    real_get_settings.cache_clear()
-    real_get_vectorizer.cache_clear()
-
-    return {
-        "batch": mock_batch_manager,
-        "vectorizer": mock_vectorizer,
-        "search_cache": mock_search_similar_execution,
-        "settings": mock_settings,
-        "client": mock_client  # Return client if you need to manipulate golden cache results in tests
-    }
-
-
-# --- Test Cases ---
-
-def test_cache_miss_and_log_saving(mock_caching_deps):
-    """
-    Test 1: The first call (Cache Miss) should execute the function and save the input vector and result.
-    """
-    mock_batch = mock_caching_deps["batch"]
-    mock_vectorizer = mock_caching_deps["vectorizer"]
-    mock_search = mock_caching_deps["search_cache"]
-
-    # Set Mock search_cache to None (Miss)
-    mock_search.return_value = None
-
-    # Mock function body
-    mock_func = MagicMock(return_value={"data": 100, "secret_key": "abc"})
-
-    @vectorize(
-        search_description="Test Cache Miss",
-        sequence_narrative="Cache Test",
-        semantic_cache=True,
-        cache_threshold=0.9
-    )
-    def my_cache_func(user_id, amount):
-        return mock_func(user_id, amount)
-
-    # Reset Mock to exclude static log calls
-    mock_batch.add_object.reset_mock()
-
-    # --- First Call (Cache Miss) ---
-    result = my_cache_func(user_id="user_X", amount=5000)
-
-    # 1. Verification: Check function execution
-    mock_func.assert_called_once_with("user_X", 5000)
-    assert result == {"data": 100, "secret_key": "abc"}
-
-    # 2. Verification: Cache search was performed and Miss returned
-    mock_search.assert_called_once()
-
-    # 3. Verification: Execution log was saved
-    mock_batch.add_object.assert_called_once()
-
-    # 4. Verification: Check if the input vector was used in the log (SUCCESS case)
-    args, kwargs = mock_batch.add_object.call_args
-    assert kwargs["collection"] == mock_caching_deps["settings"].EXECUTION_COLLECTION_NAME
-    assert kwargs["properties"]["status"] == "SUCCESS"
-    assert kwargs["vector"] == mock_vectorizer.embed.return_value # Check if input vector was saved
-
-    # 5. Verification: Check that the return value was logged and sensitive data was masked
-    logged_return = json.loads(kwargs["properties"]["return_value"])
-    assert logged_return["data"] == 100
-    assert logged_return["secret_key"] == "[MASKED]"
-
-
-@patch('vectorwave.utils.return_caching_utils.search_similar_execution')
-def test_cache_hit_identical_input_sync(mock_search_cache, mock_caching_deps):
-    """
-    Test 2: The second call (Cache Hit) should skip function execution and return the cached value.
-    """
-    mock_batch = mock_caching_deps["batch"]
-
-    # Mock function body (Should NOT be called)
-    mock_func = MagicMock(return_value="Original Result")
-
-    # Mock cached result (Format retrieved from DB)
-    cached_return_value = json.dumps({"status": "cached_success", "amount": 10000})
-    mock_cached_log = {
-        "return_value": cached_return_value,
-        "metadata": {"distance": 0.01, "certainty": 0.99},
-        "uuid": "cached-uuid-1234"
-    }
-
-    # Set Mock search_cache to Hit
-    mock_search_cache.return_value = mock_cached_log
-
-    @vectorize(
-        search_description="Test Cache Hit",
-        sequence_narrative="Cache Test",
-        semantic_cache=True,
-        cache_threshold=0.9
-    )
-    def my_cache_func_hit(user_id, amount):
-        return mock_func(user_id, amount)
-
-    # Reset Mock
-    mock_func.reset_mock()
-    mock_batch.add_object.reset_mock()
-    mock_search_cache.reset_mock()
-
-    # --- Second Call (Cache Hit) ---
-    result = my_cache_func_hit(user_id="user_X", amount=5000)
-
-    # 1. Verification: Function was NOT executed
-    mock_func.assert_not_called()
-
-    # 2. Verification: Cache search was performed and Hit returned
-    mock_search_cache.assert_called_once()
-
-    # 3. Verification: Execution log was NOT saved (Execution skipped)
-    mock_batch.add_object.assert_not_called()
-
-    # 4. Verification: Check if the result is the deserialized cached value
-    assert result == {"status": "cached_success", "amount": 10000}
-
-
-@pytest.mark.asyncio
-@patch('vectorwave.utils.return_caching_utils.search_similar_execution')
-async def test_cache_hit_async(mock_search_cache, mock_caching_deps):
-    """
-    Test 6: Tests the Cache Hit flow for an asynchronous (Async) function.
-    """
-    mock_batch = mock_caching_deps["batch"]
-
-    # Mock function body (Should NOT be called)
-    mock_func = MagicMock(return_value="Original Async Result")
-
-    # Mock cached result
-    cached_return_value = json.dumps({"status": "cached_async_success", "amount": 999})
-    mock_cached_log = {
-        "return_value": cached_return_value,
-        "metadata": {"distance": 0.001, "certainty": 0.999},
-        "uuid": "cached-async-1234"
-    }
-    mock_search_cache.return_value = mock_cached_log
-
-    @vectorize(
-        search_description="Test Async Cache Hit",
-        sequence_narrative="Async Cache Test",
-        semantic_cache=True,
-        cache_threshold=0.9
-    )
-    async def my_async_cache_func_hit(user_id, amount):
-        await asyncio.sleep(0.001)
-        return mock_func(user_id, amount)
-
-    # Reset Mock
-    mock_func.reset_mock()
-    mock_batch.add_object.reset_mock()
-    mock_search_cache.reset_mock()
-
-    # --- Call (Cache Hit) ---
-    result = await my_async_cache_func_hit(user_id="user_ASYNC", amount=100)
-
-    # 1. Verification: Function was NOT executed
-    mock_func.assert_not_called()
-
-    # 2. Verification: Cache search was performed and Hit returned
-    mock_search_cache.assert_called_once()
-
-    # 3. Verification: Execution log was NOT saved
-    mock_batch.add_object.assert_not_called()
-
-    # 4. Verification: Check if the result is the deserialized cached value
-    assert result == {"status": "cached_async_success", "amount": 999}
-
-
-@patch('vectorwave.utils.return_caching_utils.search_similar_execution')
-def test_cache_miss_low_certainty(mock_search_cache, mock_caching_deps, caplog):
-    """
-    Test 3: Tests the Cache Miss scenario when similarity is below the threshold.
-    """
-    mock_batch = mock_caching_deps["batch"]
-    mock_func = MagicMock(return_value="Executed Result")
-
-    # Set Mock search_cache to return None (Cache Miss)
-    mock_search_cache.return_value = None
-
-    @vectorize(
-        search_description="Test Miss Threshold",
-        sequence_narrative="Cache Test",
-        semantic_cache=True,
-        cache_threshold=0.99 # Set high threshold
-    )
-    def my_threshold_func(input_data):
-        return mock_func(input_data)
-
-    # Reset Mock
-    mock_func.reset_mock()
-    mock_batch.add_object.reset_mock()
-
-    # --- Call (Miss due to threshold) ---
-    result = my_threshold_func(input_data=1)
-
-    # 1. Verification: Function was executed
-    mock_func.assert_called_once()
-    assert result == "Executed Result"
-
-    # 2. Verification: Cache search was performed
-    mock_search_cache.assert_called_once()
-
-    # 3. Verification: Log was saved (because the function was executed)
-    mock_batch.add_object.assert_called_once()
-
-
-@patch('vectorwave.utils.return_caching_utils.search_similar_execution')
-def test_cache_disabled_when_vectorizer_is_none(mock_search_cache, mock_caching_deps, caplog):
-    """
-    Test 5: Tests that caching is disabled when the Python vectorizer is not configured.
-    """
-    import logging
-    caplog.set_level(logging.WARNING)
-
-    # 1. Mock: Set get_vectorizer to return None
-    with patch('vectorwave.core.decorator.get_vectorizer', return_value=None):
-        with patch('vectorwave.utils.return_caching_utils.get_vectorizer', return_value=None):
-
-            @vectorize(
-                search_description="Test Caching Disabled",
-                sequence_narrative="Disabled Test",
-                semantic_cache=True, # Request is True
-                capture_return_value=False
-            )
-            def my_disabled_cache_func(x):
-                return x
-
-            # 2. Act: Function call
-            mock_func = MagicMock(return_value=10)
-            mock_caching_deps["batch"].add_object.reset_mock()
-
-            # The decorator pre-check will disable semantic_cache before the function is executed.
-            result = my_disabled_cache_func(1)
-
-            # 3. Verification: Check if a warning was logged (at decorator load time)
-            warning_logs = [r for r in caplog.records if "Semantic caching requested" in r.message]
-            assert len(warning_logs) == 1
-            assert "no Python vectorizer is configured" in warning_logs[0].message
-
-            # 4. Verification: Cache search logic was NOT called
-            mock_search_cache.assert_not_called()
-
-            # 5. Verification: Result was returned normally
-            assert result == 1
-
-            # 6. Verification: Execution log was saved
-            mock_caching_deps["batch"].add_object.assert_called()
-
-
-def test_tracer_input_vector_data_and_masking(mock_caching_deps):
-    """
-    Tests that the _create_input_vector_data function masks sensitive keys.
-    """
-
-    # Arrange: settings has sensitive_keys={"secret_key"}
-    settings = mock_caching_deps["settings"]
-
-    # Act
-    input_data = _create_input_vector_data(
+# ---------------------------------------------------------------------------
+# Unit test — pure masking logic in input-vector preparation
+# ---------------------------------------------------------------------------
+
+def test_create_input_vector_data_masks_sensitive_keys():
+    """`_create_input_vector_data` must scrub sensitive keys from both the
+    embedding text and the canonical properties dict."""
+    data = _create_input_vector_data(
         func_name="test_func",
         args=(1, 2),
         kwargs={"amount": 100, "secret_key": "my_top_secret"},
-        sensitive_keys=settings.sensitive_keys
+        sensitive_keys={"secret_key"},
     )
 
-    # 1. Verification: Check if masking is included in the canonical text
-    text_content = input_data["text"]
-    assert "test_func" in text_content
-    assert "amount" in text_content
+    text = data["text"]
+    assert "test_func" in text
+    assert "amount" in text
+    assert "[MASKED]" not in text
+    assert "secret_key" not in text
+    assert "my_top_secret" not in text
 
-    assert "[MASKED]" not in text_content
-    assert "secret_key" not in text_content
-    assert "my_top_secret" not in text_content
-
-    # 2. Verification: Check stored properties
-    props = input_data["properties"]
+    props = data["properties"]
     assert props["function"] == "test_func"
     assert props["kwargs"]["amount"] == 100
     assert props["kwargs"]["secret_key"] == "[MASKED]"
+
+
+# ---------------------------------------------------------------------------
+# E2E helpers
+# ---------------------------------------------------------------------------
+
+def _wait_for_count(coll, expected: int, timeout: float = 8.0) -> int:
+    deadline = time.time() + timeout
+    last = -1
+    while time.time() < deadline:
+        last = len(coll.query.fetch_objects(limit=200).objects)
+        if last >= expected:
+            return last
+        time.sleep(0.1)
+    raise AssertionError(f"expected at least {expected} rows, got {last}")
+
+
+def _wait_until_indexed(settings, expected_count: int, timeout: float = 5.0) -> None:
+    """Poll the executions collection until at least `expected_count` rows are visible.
+    Used to guarantee that a previous call's log is searchable before the next call.
+    """
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _wait_for_count(execs, expected_count, timeout=timeout)
+    finally:
+        client.close()
+
+
+def _clear_all_caches():
+    from vectorwave.models.db_config import get_weaviate_settings
+    from vectorwave.batch.batch import get_batch_manager
+    from vectorwave.database.db import get_cached_client
+    from vectorwave.vectorizer.factory import get_vectorizer
+    for fn in (get_weaviate_settings, get_batch_manager, get_cached_client, get_vectorizer):
+        fn.cache_clear()
+
+
+@pytest.fixture
+def semantic_cache_env(weaviate_container, monkeypatch):
+    """E2E setup: HuggingFace vectorizer + fast batch flush + clean schemas."""
+    monkeypatch.setenv("VECTORIZER", "huggingface")
+    monkeypatch.setenv("BATCH_THRESHOLD", "1")
+    monkeypatch.setenv("FLUSH_INTERVAL_SECONDS", "0.1")
+    _clear_all_caches()
+
+    from vectorwave.models.db_config import get_weaviate_settings
+    settings = get_weaviate_settings()
+    client = get_weaviate_client(settings)
+    try:
+        for name in (
+            settings.COLLECTION_NAME,
+            settings.EXECUTION_COLLECTION_NAME,
+            settings.GOLDEN_COLLECTION_NAME,
+            "VectorWaveTokenUsage",
+        ):
+            if client.collections.exists(name):
+                client.collections.delete(name)
+        create_vectorwave_schema(client, settings)
+        create_execution_schema(client, settings)
+        create_golden_dataset_schema(client, settings)
+    finally:
+        client.close()
+
+    yield settings
+    _clear_all_caches()
+
+
+@pytest.fixture
+def no_vectorizer_env(weaviate_container, monkeypatch):
+    """E2E setup with VECTORIZER=none — semantic_cache should auto-disable."""
+    monkeypatch.setenv("VECTORIZER", "none")
+    monkeypatch.setenv("BATCH_THRESHOLD", "1")
+    monkeypatch.setenv("FLUSH_INTERVAL_SECONDS", "0.1")
+    _clear_all_caches()
+
+    from vectorwave.models.db_config import get_weaviate_settings
+    settings = get_weaviate_settings()
+    client = get_weaviate_client(settings)
+    try:
+        for name in (
+            settings.COLLECTION_NAME,
+            settings.EXECUTION_COLLECTION_NAME,
+            settings.GOLDEN_COLLECTION_NAME,
+            "VectorWaveTokenUsage",
+        ):
+            if client.collections.exists(name):
+                client.collections.delete(name)
+        create_vectorwave_schema(client, settings)
+        create_execution_schema(client, settings)
+        create_golden_dataset_schema(client, settings)
+    finally:
+        client.close()
+
+    yield settings
+    _clear_all_caches()
+
+
+# ---------------------------------------------------------------------------
+# E2E — first call seeds, identical second call hits cache
+# ---------------------------------------------------------------------------
+
+@pytest.mark.e2e
+def test_first_call_misses_and_writes_execution_log(semantic_cache_env):
+    """A cold cache: function executes, success log lands in VectorWaveExecutions."""
+    settings = semantic_cache_env
+    call_count = {"n": 0}
+
+    @vectorize(
+        search_description="Cache miss test",
+        sequence_narrative="Cold cache",
+        semantic_cache=True,
+        cache_threshold=0.5,
+    )
+    def my_cache_func(input_data):
+        call_count["n"] += 1
+        return {"result": input_data * 2}
+
+    result = my_cache_func(input_data=10)
+    assert result == {"result": 20}
+    assert call_count["n"] == 1
+
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _wait_for_count(execs, 1)
+        objs = list(execs.iterator(include_vector=True))
+        assert len(objs) == 1
+        props = objs[0].properties
+        assert props["status"] == "SUCCESS"
+        assert props["function_name"] == "my_cache_func"
+        assert json.loads(props["return_value"]) == {"result": 20}
+        # Vectorized input must be stored alongside the log
+        assert objs[0].vector["default"] is not None
+        assert len(objs[0].vector["default"]) > 0
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+def test_identical_second_call_hits_cache_and_skips_execution(semantic_cache_env):
+    """Two calls with identical inputs: the second must short-circuit via the cache."""
+    settings = semantic_cache_env
+    call_count = {"n": 0}
+
+    @vectorize(
+        search_description="Cache hit test",
+        sequence_narrative="Hit",
+        semantic_cache=True,
+        cache_threshold=0.5,
+    )
+    def my_cache_func(query):
+        call_count["n"] += 1
+        return {"answer": f"computed-for-{query}", "n": call_count["n"]}
+
+    first = my_cache_func(query="how to compute sales tax")
+    assert first == {"answer": "computed-for-how to compute sales tax", "n": 1}
+
+    # Allow the first execution log to be flushed and indexed
+    _wait_until_indexed(settings, expected_count=1)
+
+    second = my_cache_func(query="how to compute sales tax")
+    assert call_count["n"] == 1, "cache hit should have skipped the function body"
+    assert second == {"answer": "computed-for-how to compute sales tax", "n": 1}
+
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        # 1 SUCCESS log from call 1 + 1 CACHE_HIT log from call 2
+        _wait_for_count(execs, 2)
+        statuses = sorted(o.properties["status"] for o in execs.iterator())
+        assert statuses == ["CACHE_HIT", "SUCCESS"]
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+def test_different_input_misses_cache_with_high_threshold(semantic_cache_env):
+    """A semantically distant second call must not match at high threshold."""
+    settings = semantic_cache_env
+    call_count = {"n": 0}
+
+    @vectorize(
+        search_description="Cache threshold test",
+        sequence_narrative="Strict",
+        semantic_cache=True,
+        cache_threshold=0.95,
+    )
+    def my_strict_func(query):
+        call_count["n"] += 1
+        return {"answer": query.upper(), "n": call_count["n"]}
+
+    my_strict_func(query="how do I compute sales tax for an order")
+    _wait_until_indexed(settings, expected_count=1)
+    second = my_strict_func(query="render a react component into the dom tree")
+
+    # Two semantically distant inputs: the second should re-execute
+    assert call_count["n"] == 2
+    assert second["n"] == 2
+
+    client = get_weaviate_client(settings)
+    try:
+        execs = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        _wait_for_count(execs, 2)
+        statuses = [o.properties["status"] for o in execs.iterator()]
+        assert statuses.count("SUCCESS") == 2
+        assert "CACHE_HIT" not in statuses
+    finally:
+        client.close()
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_async_function_hits_cache_on_second_call(semantic_cache_env):
+    settings = semantic_cache_env
+    call_count = {"n": 0}
+
+    @vectorize(
+        search_description="Async cache test",
+        sequence_narrative="Async",
+        semantic_cache=True,
+        cache_threshold=0.5,
+    )
+    async def my_async_func(query):
+        call_count["n"] += 1
+        await asyncio.sleep(0.01)
+        return {"answer": f"async-{query}", "n": call_count["n"]}
+
+    first = await my_async_func(query="how to compute sales tax")
+    assert first["n"] == 1
+
+    _wait_until_indexed(settings, expected_count=1)
+
+    second = await my_async_func(query="how to compute sales tax")
+    assert call_count["n"] == 1
+    assert second["n"] == 1
+
+
+@pytest.mark.e2e
+def test_semantic_cache_disables_when_no_vectorizer(no_vectorizer_env, caplog):
+    """semantic_cache=True with VECTORIZER=none is downgraded to plain logging
+    with a warning at decoration time."""
+    settings = no_vectorizer_env
+    call_count = {"n": 0}
+
+    import logging
+    caplog.set_level(logging.WARNING)
+
+    @vectorize(
+        search_description="Disabled cache",
+        sequence_narrative="Disabled",
+        semantic_cache=True,
+        cache_threshold=0.5,
+    )
+    def my_disabled_cache_func(x):
+        call_count["n"] += 1
+        return x
+
+    assert my_disabled_cache_func(1) == 1
+    assert my_disabled_cache_func(1) == 1
+    assert call_count["n"] == 2, "without a vectorizer both calls must execute"
+
+    warnings = [r for r in caplog.records if "Semantic caching requested" in r.message]
+    assert len(warnings) == 1
+    assert "no Python vectorizer" in warnings[0].message
