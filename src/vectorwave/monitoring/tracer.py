@@ -1,5 +1,6 @@
 import logging
 import inspect
+import threading
 import time
 import traceback
 import json
@@ -33,7 +34,10 @@ class TraceCollector:
         self.settings: WeaviateSettings = get_weaviate_settings()
         self.batch = get_batch_manager()
         self.alerter: BaseAlerter = get_alerter()
+        # alert_sent is checked-and-set under _alert_lock so concurrent failing
+        # spans on the same trace can't both fire an alert (or both suppress one).
         self.alert_sent: bool = False
+        self._alert_lock = threading.Lock()
 
 
 current_tracer_var: ContextVar[Optional[TraceCollector]] = ContextVar('current_tracer', default=None)
@@ -229,18 +233,24 @@ def _perform_background_logging(ctx: SpanContext):
         return_value_log: Optional[str] = None
         vectorizer = get_vectorizer()
 
-        # 2. Vectorize Inputs (If enabled)
-        if ctx.capture_return_value and vectorizer is not None:
+        # 2. Vectorize for storage. Successful calls embed the input args (used
+        # by semantic cache + drift detection); failed calls embed the error
+        # message (used by search_errors_by_message). Mutually exclusive — the
+        # earlier code computed both and silently overwrote the input vector.
+        if vectorizer is not None:
             try:
-                input_vector_data = _create_input_vector_data(
-                    func_name=ctx.func.__name__,
-                    args=ctx.args,
-                    kwargs=ctx.kwargs,
-                    sensitive_keys=ctx.tracer.settings.sensitive_keys
-                )
-                vector_to_add = vectorizer.embed(input_vector_data['text'])
+                if ctx.status == "SUCCESS" and ctx.capture_return_value:
+                    input_vector_data = _create_input_vector_data(
+                        func_name=ctx.func.__name__,
+                        args=ctx.args,
+                        kwargs=ctx.kwargs,
+                        sensitive_keys=ctx.tracer.settings.sensitive_keys
+                    )
+                    vector_to_add = vectorizer.embed(input_vector_data['text'])
+                elif ctx.status != "SUCCESS":
+                    vector_to_add = vectorizer.embed(str(ctx.error_msg))
             except Exception as ve:
-                logger.warning(f"Failed to vectorize input for '{ctx.func.__name__}': {ve}")
+                logger.warning(f"Failed to vectorize span for '{ctx.func.__name__}': {ve}")
 
         # 3. Process Result
         if ctx.status == "SUCCESS" and ctx.capture_return_value:
@@ -251,13 +261,6 @@ def _perform_background_logging(ctx: SpanContext):
                 return_value_log = json.dumps(processed_result)
             except TypeError:
                 return_value_log = str(processed_result)
-
-        # 4. Vectorize Error (If needed)
-        if ctx.status != "SUCCESS" and vectorizer is not None:
-            try:
-                vector_to_add = vectorizer.embed(str(ctx.error_msg))
-            except Exception as ve:
-                logger.warning(f"Failed to vectorize error message: {ve}")
 
         # 5. Create Span Properties
         span_properties = _create_span_properties(
@@ -275,14 +278,18 @@ def _perform_background_logging(ctx: SpanContext):
             exec_source=ctx.exec_source
         )
 
-        # 6. Alerting (If Failure)
+        # 6. Alerting (If Failure). Lock the check-and-set so concurrent
+        # failing spans on the same trace dedupe to a single alert.
         if ctx.status != "SUCCESS" and ctx.enable_alert:
-            try:
-                if not ctx.tracer.alert_sent:
-                    ctx.tracer.alerter.notify(span_properties)
+            with ctx.tracer._alert_lock:
+                should_send = not ctx.tracer.alert_sent
+                if should_send:
                     ctx.tracer.alert_sent = True
-            except Exception as alert_e:
-                logger.warning(f"Alerter failed: {alert_e}")
+            if should_send:
+                try:
+                    ctx.tracer.alerter.notify(span_properties)
+                except Exception as alert_e:
+                    logger.warning(f"Alerter failed: {alert_e}")
 
         # 7. Semantic Drift Detection
         if ctx.tracer.settings.DRIFT_DETECTION_ENABLED and vector_to_add and ctx.status == "SUCCESS":
@@ -324,11 +331,27 @@ def _perform_background_logging(ctx: SpanContext):
         logger.error(f"Background logging failed for '{ctx.func.__name__}': {e}")
 
 
-def _init_trace_root(kwargs):
-    """Setup for trace_root. Returns token or None if already inside a trace."""
+def _init_trace_root(kwargs: Dict[str, Any], func: Callable):
+    """Setup for trace_root. Returns token or None if already inside a trace.
+
+    `trace_id` is a reserved kwarg that the tracer consumes to set the trace
+    id, but if the wrapped function declares its own `trace_id` parameter we
+    leave it in kwargs and just read its value so the function still receives
+    it. This avoids stealing a legitimate user argument.
+    """
     if current_tracer_var.get() is not None:
         return None
-    trace_id = kwargs.pop('trace_id', str(uuid4()))
+    try:
+        sig = _get_cached_signature(func)
+        func_owns_trace_id = "trace_id" in sig.parameters
+    except (TypeError, ValueError):
+        func_owns_trace_id = False
+
+    if func_owns_trace_id:
+        trace_id = kwargs.get("trace_id") or str(uuid4())
+    else:
+        trace_id = kwargs.pop("trace_id", None) or str(uuid4())
+
     tracer = TraceCollector(trace_id=trace_id)
     token = current_tracer_var.set(tracer)
     current_span_id_var.set(None)
@@ -340,7 +363,7 @@ def trace_root() -> Callable:
         if inspect.iscoroutinefunction(func):
             @wraps(func)
             async def async_wrapper(*args, **kwargs):
-                token = _init_trace_root(kwargs)
+                token = _init_trace_root(kwargs, func)
                 if token is None:
                     return await func(*args, **kwargs)
                 try:
@@ -351,7 +374,7 @@ def trace_root() -> Callable:
         else:
             @wraps(func)
             def sync_wrapper(*args, **kwargs):
-                token = _init_trace_root(kwargs)
+                token = _init_trace_root(kwargs, func)
                 if token is None:
                     return func(*args, **kwargs)
                 try:
