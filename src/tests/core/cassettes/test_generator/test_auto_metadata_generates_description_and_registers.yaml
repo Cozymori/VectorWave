@@ -1,0 +1,25 @@
+interactions:
+- request:
+    body: '{"messages":[{"role":"system","content":"You are a technical documentation
+      assistant. Output only JSON."},{"role":"user","content":"prompt"}],"model":"gpt-4o-mini","response_format":{"type":"json_object"},"temperature":0.0}'
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      authorization:
+      - REDACTED
+      content-type:
+      - application/json
+    method: POST
+    uri: https://api.openai.com/v1/chat/completions
+  response:
+    body:
+      string: '{"id":"chatcmpl-gen-001","object":"chat.completion","created":1735689600,"model":"gpt-4o-mini-2024-07-18","choices":[{"index":0,"message":{"role":"assistant","content":"{\"search_description\":\"Adds two numbers and returns the sum.\",\"sequence_narrative\":\"Receives two integers a and b, returns a + b.\"}"},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":42,"total_tokens":162},"system_fingerprint":"fp_test"}'
+    headers:
+      content-type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+version: 1
