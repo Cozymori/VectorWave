@@ -28,7 +28,7 @@ def test_clean_weaviate_creates_and_wipes(clean_weaviate):
         client.collections.create(
             name="VectorWaveFunctions",
             properties=[wvc.Property(name="dummy", data_type=wvc.DataType.TEXT)],
-            vectorizer_config=wvc.Configure.Vectorizer.none(),
+            vector_config=wvc.Configure.Vectors.self_provided(),
         )
         assert client.collections.exists("VectorWaveFunctions")
     finally:

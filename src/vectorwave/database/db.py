@@ -160,14 +160,19 @@ def _build_custom_properties(settings: WeaviateSettings, collection_name: str):
     return custom_properties
 
 
-def _create_collection_safe(client, name, properties, vectorizer_config, generative_config=None):
-    """Creates a collection with standardized error handling."""
+def _create_collection_safe(client, name, properties, vector_config, generative_config=None):
+    """Creates a collection with standardized error handling.
+
+    `vector_config` takes the v4-recommended `Configure.Vectors.*` builder
+    (self_provided / text2vec_openai / etc.) which superseded the legacy
+    `vectorizer_config` argument.
+    """
     logger.info("Creating collection '%s'", name)
     try:
         return client.collections.create(
             name=name,
             properties=properties,
-            vectorizer_config=vectorizer_config,
+            vector_config=vector_config,
             generative_config=generative_config
         )
     except Exception as e:
@@ -193,12 +198,12 @@ def create_vectorwave_schema(client: weaviate.WeaviateClient, settings: Weaviate
 
     all_properties = base_properties + _build_custom_properties(settings, collection_name)
 
-    vector_config = wvc.Configure.Vectorizer.none()
+    vector_config = wvc.Configure.Vectors.self_provided()
     generative_config = None
 
     if settings.VECTORIZER.lower() == "weaviate_module":
         if settings.WEAVIATE_VECTORIZER_MODULE == "text2vec-openai":
-            vector_config = wvc.Configure.Vectorizer.text2vec_openai()
+            vector_config = wvc.Configure.Vectors.text2vec_openai()
         if settings.WEAVIATE_GENERATIVE_MODULE == "generative-openai":
             generative_config = wvc.Configure.Generative.openai()
 
@@ -231,7 +236,7 @@ def create_execution_schema(client: weaviate.WeaviateClient, settings: WeaviateS
     ]
     properties += _build_custom_properties(settings, collection_name)
 
-    return _create_collection_safe(client, collection_name, properties, wvc.Configure.Vectorizer.none())
+    return _create_collection_safe(client, collection_name, properties, wvc.Configure.Vectors.self_provided())
 
 
 def create_golden_dataset_schema(client: weaviate.WeaviateClient, settings: WeaviateSettings):
@@ -252,7 +257,7 @@ def create_golden_dataset_schema(client: weaviate.WeaviateClient, settings: Weav
     ]
     properties += _build_custom_properties(settings, collection_name)
 
-    return _create_collection_safe(client, collection_name, properties, wvc.Configure.Vectorizer.none())
+    return _create_collection_safe(client, collection_name, properties, wvc.Configure.Vectors.self_provided())
 
 
 def create_usage_schema(client: weaviate.WeaviateClient, settings: WeaviateSettings):
@@ -270,7 +275,7 @@ def create_usage_schema(client: weaviate.WeaviateClient, settings: WeaviateSetti
         wvc.Property(name="tokens", data_type=wvc.DataType.INT),
     ]
 
-    return _create_collection_safe(client, collection_name, properties, wvc.Configure.Vectorizer.none())
+    return _create_collection_safe(client, collection_name, properties, wvc.Configure.Vectors.self_provided())
 
 
 def update_database_schema():
