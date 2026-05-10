@@ -147,10 +147,30 @@ How you verified the change (`pytest` output, manual verification, etc.).
 A few things to double-check before opening a PR:
 
 - Tests pass locally: `pytest -m "not live"`
-- No secrets in cassettes: `git diff --check` and grep for `sk-`,
-  `Bearer`, or other tokens before committing
+- No secrets in cassettes (the pre-commit hook does this for you — see below)
 - Lint is clean: `flake8 src/ --select=E9,F63,F7,F82`
 - The Rust extension still builds: `maturin develop`
+
+### Pre-commit hook for secret leaks
+
+A pre-commit hook scans staged files for OpenAI / Anthropic / AWS keys and
+non-redacted Authorization headers, so a freshly recorded VCR cassette
+can't sneak a token into git history. To enable:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+The check lives at `scripts/check_secrets.py` and runs against every
+staged file with a text-y extension or a path under `cassettes/`. If you
+hit a false positive (very rare), edit the line to use a placeholder
+like `sk-test-...` or whitelist the path in `_SKIP_FILES` at the top of
+the script. To run the check manually:
+
+```bash
+git diff --cached --name-only -z | xargs -0 python scripts/check_secrets.py
+```
 
 ### What not to commit
 
