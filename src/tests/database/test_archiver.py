@@ -70,17 +70,19 @@ def test_convert_to_training_format_excludes_metadata_keys():
 @pytest.mark.e2e
 def test_export_writes_jsonl_and_clears_when_requested(clean_weaviate, e2e_settings, tmp_path):
     """export_and_clear with clear_after_export=True writes JSONL and removes the rows."""
+    import weaviate.classes.query as wvc_query
+
     client = get_weaviate_client()
     try:
         create_execution_schema(client, e2e_settings)
         coll = client.collections.get(e2e_settings.EXECUTION_COLLECTION_NAME)
-        _seed(coll, function_name="test_func", return_value="r1")
-        _seed(coll, function_name="test_func", return_value="r2")
+        _seed(coll, function_name="testfunc", return_value="r1")
+        _seed(coll, function_name="testfunc", return_value="r2")
 
         out = tmp_path / "exports" / "dataset.jsonl"
         archiver = VectorWaveArchiver()
         result = archiver.export_and_clear(
-            function_name="test_func",
+            function_name="testfunc",
             output_file=str(out),
             clear_after_export=True,
         )
@@ -92,10 +94,22 @@ def test_export_writes_jsonl_and_clears_when_requested(clean_weaviate, e2e_setti
         assert len(rows) == 2
         assert all("messages" in r for r in rows)
 
-        remaining = coll.query.fetch_objects(limit=10).objects
+        # Only assert about the rows we seeded; other tests may share the session-scoped container
+        remaining = coll.query.fetch_objects(
+            filters=wvc_query.Filter.by_property("function_name").equal("testfunc"),
+            limit=10,
+        ).objects
         assert len(remaining) == 0
     finally:
         client.close()
+
+
+def _count_for(coll, function_name: str) -> int:
+    import weaviate.classes.query as wvc_query
+    return len(coll.query.fetch_objects(
+        filters=wvc_query.Filter.by_property("function_name").equal(function_name),
+        limit=100,
+    ).objects)
 
 
 @pytest.mark.e2e
@@ -104,19 +118,19 @@ def test_export_only_does_not_delete(clean_weaviate, e2e_settings, tmp_path):
     try:
         create_execution_schema(client, e2e_settings)
         coll = client.collections.get(e2e_settings.EXECUTION_COLLECTION_NAME)
-        _seed(coll, function_name="keep_me", return_value="r1")
+        _seed(coll, function_name="keepme", return_value="r1")
 
         out = tmp_path / "backup.jsonl"
         archiver = VectorWaveArchiver()
         result = archiver.export_and_clear(
-            function_name="keep_me",
+            function_name="keepme",
             output_file=str(out),
             clear_after_export=False,
         )
 
         assert result["exported"] == 1
         assert result["deleted"] == 0
-        assert len(coll.query.fetch_objects(limit=10).objects) == 1
+        assert _count_for(coll, "keepme") == 1
     finally:
         client.close()
 
@@ -128,13 +142,13 @@ def test_delete_only_skips_file_and_purges(clean_weaviate, e2e_settings, tmp_pat
     try:
         create_execution_schema(client, e2e_settings)
         coll = client.collections.get(e2e_settings.EXECUTION_COLLECTION_NAME)
-        _seed(coll, function_name="purge_me", return_value="ok", status="SUCCESS")
-        _seed(coll, function_name="purge_me", return_value="bad", status="FAILURE")
+        _seed(coll, function_name="purgeme", return_value="ok", status="SUCCESS")
+        _seed(coll, function_name="purgeme", return_value="bad", status="FAILURE")
 
         out = tmp_path / "should_not_be_created.jsonl"
         archiver = VectorWaveArchiver()
         result = archiver.export_and_clear(
-            function_name="purge_me",
+            function_name="purgeme",
             output_file=str(out),
             delete_only=True,
         )
@@ -142,7 +156,7 @@ def test_delete_only_skips_file_and_purges(clean_weaviate, e2e_settings, tmp_pat
         assert result["exported"] == 0
         assert result["deleted"] == 2
         assert not out.exists()
-        assert len(coll.query.fetch_objects(limit=10).objects) == 0
+        assert _count_for(coll, "purgeme") == 0
     finally:
         client.close()
 
@@ -159,7 +173,7 @@ def test_file_write_failure_aborts_delete(clean_weaviate, e2e_settings, monkeypa
         original_open = open
 
         def failing_open(*args, **kwargs):
-            if args and args[0] and "safety_export.jsonl" in str(args[0]):
+            if args and args[0] and "safetyexport.jsonl" in str(args[0]):
                 raise IOError("Disk Full")
             return original_open(*args, **kwargs)
 
@@ -168,13 +182,13 @@ def test_file_write_failure_aborts_delete(clean_weaviate, e2e_settings, monkeypa
         archiver = VectorWaveArchiver()
         result = archiver.export_and_clear(
             function_name="safety",
-            output_file="safety_export.jsonl",
+            output_file="safetyexport.jsonl",
             clear_after_export=True,
         )
 
         assert result["exported"] == 0
         assert result["deleted"] == 0
-        assert len(coll.query.fetch_objects(limit=10).objects) == 1
+        assert _count_for(coll, "safety") == 1
     finally:
         client.close()
 

@@ -1,159 +1,161 @@
-from unittest.mock import MagicMock, call, ANY
+"""End-to-end tests for the Weaviate batch manager.
+
+The Rust-backed batch manager exposes only `add_object` to user code. We
+exercise its real behaviour by calling `_flush_batch_core` directly (the
+same callback the Rust worker thread invokes) and asserting items land in
+Weaviate. Connection-failure paths stay mocked because they are tedious to
+reproduce against a live container.
+"""
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
+from uuid import uuid4
+
 import pytest
+
 from vectorwave.batch.batch import get_batch_manager
+from vectorwave.database.db import (
+    create_execution_schema,
+    create_vectorwave_schema,
+    get_weaviate_client,
+)
 from vectorwave.exception.exceptions import WeaviateConnectionError
 from vectorwave.models.db_config import WeaviateSettings
 
-@pytest.fixture
-def mock_deps(monkeypatch):
-    """
-    Fixture to mock dependencies for batch.py (db, config, atexit)
-    """
-    # Mock WeaviateClient
-    mock_client = MagicMock()
-    mock_client.batch = MagicMock()
-    mock_client.batch.configure = MagicMock()
-    mock_client.batch.add_object = MagicMock()
-    mock_client.batch.flush = MagicMock()
 
-    # Mock collection
-    mock_collection_data = MagicMock()
-    mock_collection = MagicMock()
-    mock_collection.data = mock_collection_data
-    mock_client.collections.get = MagicMock(return_value=mock_collection)
+# ---------------------------------------------------------------------------
+# Unit tests — singleton behaviour and connection-failure path
+# ---------------------------------------------------------------------------
 
-    # Mock batch context manager
-    mock_batch_context = MagicMock()
-    mock_client.batch.dynamic.return_value.__enter__.return_value = mock_batch_context
-
-    # Mock get_weaviate_client
-    mock_get_client = MagicMock(return_value=mock_client)
-    monkeypatch.setattr("vectorwave.batch.batch.get_weaviate_client", mock_get_client)
-
-    # Mock get_weaviate_settings
-    mock_settings = WeaviateSettings()
-    mock_get_settings = MagicMock(return_value=mock_settings)
-    monkeypatch.setattr("vectorwave.batch.batch.get_weaviate_settings", mock_get_settings)
-
-    # Mock atexit.register
-    mock_atexit_register = MagicMock()
-    monkeypatch.setattr("atexit.register", mock_atexit_register)
-
-    # Mock threading if needed (though Rust handles threads now)
-    mock_thread = MagicMock()
-    monkeypatch.setattr("threading.Thread", mock_thread)
-
-    # Clear lru_cache to ensure fresh instance
-    get_batch_manager.cache_clear()
-
-    return {
-        "get_client": mock_get_client,
-        "get_settings": mock_get_settings,
-        "client": mock_client,
-        "settings": mock_settings,
-        "atexit": mock_atexit_register,
-        "batch_context": mock_batch_context
-    }
-
-def test_get_batch_manager_is_singleton(mock_deps):
-    """
-    Case 1: Test if get_batch_manager() always returns the same instance (singleton)
-    """
-    manager1 = get_batch_manager()
-    manager2 = get_batch_manager()
-    assert manager1 is manager2
-
-def test_batch_manager_initialization(mock_deps):
-    """
-    Case 2: Test if BatchManager correctly calls dependencies upon initialization
-    """
-    manager = get_batch_manager()
-
-    mock_deps["get_settings"].assert_called_once()
-    mock_deps["get_client"].assert_called_once_with(mock_deps["settings"])
-
-    assert manager._initialized is True
-
-def test_batch_manager_init_failure(monkeypatch):
-    """
-    Case 3: Test if _initialized remains False when DB connection fails
-    """
-    mock_get_client_fail = MagicMock(side_effect=WeaviateConnectionError("Test connection error"))
-    monkeypatch.setattr("vectorwave.batch.batch.get_weaviate_client", mock_get_client_fail)
+def test_batch_manager_init_marks_uninitialized_when_connect_fails(monkeypatch):
+    monkeypatch.setattr(
+        "vectorwave.batch.batch.get_weaviate_client",
+        MagicMock(side_effect=WeaviateConnectionError("Test connection error")),
+    )
+    monkeypatch.setattr(
+        "vectorwave.batch.batch.get_weaviate_settings",
+        MagicMock(return_value=WeaviateSettings()),
+    )
 
     get_batch_manager.cache_clear()
     manager = get_batch_manager()
 
     assert manager._initialized is False
 
-def test_add_object_enqueues_item(mock_deps):
-    """
-    [Updated] Case 4: Test if add_object() sends data to Rust backend correctly.
-    We assume success if no exception is raised, as the queue is internal to Rust.
-    """
-    manager = get_batch_manager()
-    props = {"key": "value"}
 
+# ---------------------------------------------------------------------------
+# E2E tests
+# ---------------------------------------------------------------------------
+
+def _clear_all_caches():
+    from vectorwave.models.db_config import get_weaviate_settings
+    from vectorwave.database.db import get_cached_client
+    from vectorwave.vectorizer.factory import get_vectorizer
+    for fn in (get_weaviate_settings, get_batch_manager, get_cached_client, get_vectorizer):
+        fn.cache_clear()
+
+
+@pytest.fixture
+def batch_e2e_env(weaviate_container):
+    """Reset the batch manager and ensure the executions collection exists."""
+    _clear_all_caches()
+
+    from vectorwave.models.db_config import get_weaviate_settings
+    settings = get_weaviate_settings()
+    client = get_weaviate_client(settings)
     try:
-        manager.add_object(
-            collection="TestCollection",
-            properties=props,
-            uuid="test-uuid",
-            vector=[0.1]
-        )
-    except Exception as e:
-        pytest.fail(f"add_object failed with error: {e}")
+        for name in (
+            settings.COLLECTION_NAME,
+            settings.EXECUTION_COLLECTION_NAME,
+            settings.GOLDEN_COLLECTION_NAME,
+            "VectorWaveTokenUsage",
+        ):
+            if client.collections.exists(name):
+                client.collections.delete(name)
+        create_vectorwave_schema(client, settings)
+        create_execution_schema(client, settings)
+    finally:
+        client.close()
 
-    # Ensure DB was NOT called directly (buffering works)
-    mock_deps["client"].collections.get.assert_not_called()
+    yield settings
+    _clear_all_caches()
 
-def test_flush_batch_sends_to_weaviate(mock_deps):
-    """
-    [Updated] Case 5: Test if the Python callback (_flush_batch_core) sends items
-    using client.batch.dynamic context. This validates the logic that Rust calls back.
-    """
+
+def _make_log_props(function_name: str = "fn") -> dict:
+    return {
+        "function_uuid": str(uuid4()),
+        "function_name": function_name,
+        "status": "SUCCESS",
+        "duration_ms": 1.0,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@pytest.mark.e2e
+def test_get_batch_manager_returns_a_ready_singleton(batch_e2e_env):
+    m1 = get_batch_manager()
+    m2 = get_batch_manager()
+    assert m1 is m2
+    assert m1._initialized is True
+
+
+@pytest.mark.e2e
+def test_flush_batch_writes_items_to_weaviate(batch_e2e_env):
+    """Direct invocation of `_flush_batch_core` (the Rust callback) writes items."""
+    settings = batch_e2e_env
     manager = get_batch_manager()
 
-    # Simulate items passed back from Rust
     items = [
-        {"collection": "C1", "properties": {"p": 1}, "uuid": "u1", "vector": None},
-        {"collection": "C2", "properties": {"p": 2}, "uuid": "u2", "vector": [1.0]}
+        {
+            "collection": settings.EXECUTION_COLLECTION_NAME,
+            "properties": _make_log_props(function_name="alpha"),
+            "uuid": str(uuid4()),
+            "vector": None,
+        },
+        {
+            "collection": settings.EXECUTION_COLLECTION_NAME,
+            "properties": _make_log_props(function_name="beta"),
+            "uuid": str(uuid4()),
+            "vector": None,
+        },
     ]
 
-    # Manually trigger the callback method
     manager._flush_batch_core(items)
 
-    # Check if dynamic batch context was entered
-    mock_deps["client"].batch.dynamic.assert_called_once()
+    client = get_weaviate_client(settings)
+    try:
+        coll = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        names = sorted(o.properties["function_name"] for o in coll.iterator())
+        assert names == ["alpha", "beta"]
+    finally:
+        client.close()
 
-    # Check if batch.add_object was called for each item
-    mock_batch_ctx = mock_deps["batch_context"]
-    assert mock_batch_ctx.add_object.call_count == 2
 
-    mock_batch_ctx.add_object.assert_has_calls([
-        call(collection="C1", properties={"p": 1}, uuid="u1", vector=None),
-        call(collection="C2", properties={"p": 2}, uuid="u2", vector=[1.0])
-    ])
-
-def test_flush_batch_reconnects_if_disconnected(mock_deps):
-    """
-    [Updated] Case 6: Test reconnection logic in the callback
-    """
+@pytest.mark.e2e
+def test_flush_batch_reconnects_after_disconnect(batch_e2e_env):
+    """If the manager is marked uninitialized, flush should reconnect and still write."""
+    settings = batch_e2e_env
     manager = get_batch_manager()
 
-    # Simulate disconnection
+    # Simulate a stale connection state
     manager._initialized = False
     manager.client = None
 
-    # Reset mocks
-    mock_deps["get_client"].reset_mock()
+    items = [
+        {
+            "collection": settings.EXECUTION_COLLECTION_NAME,
+            "properties": _make_log_props(function_name="reconnect"),
+            "uuid": str(uuid4()),
+            "vector": None,
+        }
+    ]
 
-    items = [{"collection": "C1", "properties": {}, "uuid": "u1", "vector": None}]
-
-    # Trigger flush callback
     manager._flush_batch_core(items)
+    assert manager._initialized is True
 
-    # Should try to reconnect
-    mock_deps["get_client"].assert_called_once()
-    # And then send
-    mock_deps["client"].batch.dynamic.assert_called_once()
+    client = get_weaviate_client(settings)
+    try:
+        coll = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        names = [o.properties["function_name"] for o in coll.iterator()]
+        assert "reconnect" in names
+    finally:
+        client.close()
