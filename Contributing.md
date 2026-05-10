@@ -1,250 +1,172 @@
-# Git Commit Message Guide
+# Contributing to VectorWave
 
-## Commit Message Format
+Thanks for your interest in VectorWave. This guide walks through the local
+development setup, how the test suite is organised, and the conventions
+used for commits and pull requests.
 
-```
-<type>(<scope>): <subject>
-```
+## Quick start
 
-- **type**: Type of commit (required)
-- **scope**: Scope of changes (optional)
-- **subject**: Brief description (required)
-
-## Commit Types
-
-### feat: New feature
 ```bash
-feat: Add new feature
-feat(auth): Add user signup API endpoint
+# 1. Clone and install in editable mode with dev extras
+git clone https://github.com/Cozymori/VectorWave.git
+cd VectorWave
+pip install -e ".[dev]" maturin
+
+# 2. Compile the Rust extension (required for the high-throughput batch path)
+maturin develop
+
+# 3. Spin up a local Weaviate for running test_ex/ scripts end-to-end
+vectorwave dev start
 ```
 
-### fix: Bug fix
+You should now be able to run any script under `test_ex/` and see VectorWave
+write to the local Weaviate.
+
+## Dev environment CLI
+
+`vectorwave dev` manages a containerised Weaviate + console stack so you
+don't need to wire docker-compose, env vars, and the Rust build yourself.
+
+| Command | What it does |
+|---|---|
+| `vectorwave dev start` | Bring up Weaviate (8080), gRPC (50051), and the console (8081). Polls until the readiness endpoint returns 200 and prints the env vars to set. |
+| `vectorwave dev stop` | Stop the containers. |
+| `vectorwave dev reset` | Wipe data volumes and restart from scratch. |
+| `vectorwave dev status` | Show running containers + the readiness HTTP status. |
+| `vectorwave dev logs [service] [-f]` | Tail logs (default: the last 100 lines). |
+
+Required env (set in your shell or a `.env`):
+
+```
+WEAVIATE_HOST=localhost
+WEAVIATE_PORT=8080
+WEAVIATE_GRPC_PORT=50051
+```
+
+If you want vectorisation in `test_ex/` scripts, also set `OPENAI_API_KEY`.
+The dev compose file picks it up so Weaviate's `text2vec-openai` module can
+call it.
+
+## Running tests
+
 ```bash
-fix: Fix bug
-fix(parser): Fix null pointer exception
+pytest                              # full suite (boots a temporary Weaviate)
+pytest src/tests/database/          # one directory
+pytest -m e2e                       # only end-to-end tests
+pytest -m "not live"                # exclude live API tests (the default in CI)
 ```
 
-### docs: Documentation changes
-```bash
-docs: Update documentation
-docs(readme): Update installation guidelines
+The first run downloads:
+
+- `semitechnologies/weaviate:1.28.4` (~250MB)
+- `sentence-transformers/all-MiniLM-L6-v2` (~22MB) for the local HuggingFace
+  vectorizer used by some search/cache tests
+
+Both are cached for subsequent runs.
+
+### Test categories
+
+| Marker / location | Boots a real Weaviate? | Hits external APIs? | When it runs |
+|---|---|---|---|
+| Pure unit tests (no marker) | No | No | Always |
+| `@pytest.mark.e2e` | Yes (testcontainers) | No | Always |
+| `@pytest.mark.vcr` | Yes | Replayed from a YAML cassette | Always |
+| `@pytest.mark.live` | Yes | **Real** OpenAI/Anthropic | Nightly CI only |
+
+The session-scoped `weaviate_container` fixture starts one Weaviate per
+pytest session and tears it down at the end. Tests that need DB isolation
+use the `clean_weaviate` fixture which wipes the four VectorWave
+collections before and after each test.
+
+### Adding a test that calls an LLM
+
+1. Mark it with `@pytest.mark.vcr` (and `@pytest.mark.e2e` if it also writes
+   to Weaviate).
+2. Run once with a real key to record:
+   ```bash
+   OPENAI_API_KEY=sk-... pytest path/to/test_file.py --record-mode=once
+   ```
+3. Inspect the generated cassette under
+   `<test-dir>/cassettes/<test_module>/<test_name>.yaml`. Confirm the
+   `authorization` header is `REDACTED` (the global `vcr_config` in
+   `src/tests/conftest.py` strips it automatically) and that no other
+   secrets slipped through (org IDs, project IDs, etc.).
+4. Commit the test **and** the cassette.
+
+Reviewers replay your cassette with no key required. The nightly `live`
+workflow re-runs the same test against the real API to catch upstream
+response-shape drift.
+
+## Commits and pull requests
+
+### Commit messages
+
+Follow Conventional Commits with a sign-off:
+
+```
+type(scope): subject
+
+- bullet describing what changed and why
+
+Signed-off-by: Your Name <you@example.com>
 ```
 
-### style: Code style changes (no functional changes)
-```bash
-style: Change code formatting
-style(api): Apply Prettier formatting
+Common types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `perf`,
+`ci`, `build`. Keep the subject under ~50 characters in imperative mood
+("Add" not "Added"); put the "why" in the body. Examples:
+
+```
+feat(replay): support mock injection in VectorWaveReplayer
+fix(batch): drain queue on shutdown to avoid losing pending writes
+test(decorator): cover async @vectorize through the e2e fixture
 ```
 
-### refactor: Code refactoring (no functional changes)
-```bash
-refactor: Improve code structure
-refactor(user): Simplify UserService logic
+### Pull requests
+
+PRs go from a fork's branch to `Cozymori/VectorWave:main` and use this
+structure (English):
+
+```markdown
+## Summary
+
+1–3 sentences explaining the change.
+
+## Changes
+
+Itemised list of what was modified, with code snippets where helpful.
+
+## Bug Fix
+
+If applicable: root cause and how the fix addresses it.
+
+## Test Results
+
+How you verified the change (`pytest` output, manual verification, etc.).
 ```
 
-### test: Test code changes
-```bash
-test: Add or modify tests
-test(auth): Add test cases for login failures
-```
+A few things to double-check before opening a PR:
 
-### chore: Build, configuration, and other miscellaneous tasks
-```bash
-chore: Update build configuration
-chore: Add *.log to .gitignore
-```
+- Tests pass locally: `pytest -m "not live"`
+- No secrets in cassettes: `git diff --check` and grep for `sk-`,
+  `Bearer`, or other tokens before committing
+- Lint is clean: `flake8 src/ --select=E9,F63,F7,F82`
+- The Rust extension still builds: `maturin develop`
 
-### perf: Performance improvements
-```bash
-perf: Improve performance
-perf(api): Optimize database query
-```
+### What not to commit
 
-### ci: CI/CD configuration changes
-```bash
-ci: Update CI pipeline
-ci: Add GitHub Actions workflow
-```
+These are gitignored or excluded by convention:
 
-### build: Build system changes
-```bash
-build: Update dependencies
-build: Update webpack configuration
-```
+- `.env` files (secrets)
+- `*.so` artefacts from `maturin develop`
+- `*_cache.json`, `weaviate-data/` (local state)
+- `.idea/`, `.DS_Store`, editor scratch files
 
-### revert: Revert previous commit
-```bash
-revert: Revert "feat: Add new feature"
-```
+## Filing issues
 
-## Best Practices
+For bugs, please include:
 
-### 1. Use imperative mood
-✅ Good:
-```bash
-feat(auth): Add user login functionality
-fix(api): Resolve CORS issue
-docs: Update API documentation
-```
-
-❌ Bad:
-```bash
-feat(auth): Added user login functionality
-fix(api): Resolved CORS issue
-docs: Updated API documentation
-```
-
-### 2. Keep subject line under 50 characters
-```bash
-✅ feat(auth): Add OAuth2 authentication
-❌ feat(auth): Add OAuth2 authentication with Google, Facebook, and Twitter providers
-```
-
-### 3. Capitalize the subject line
-```bash
-✅ feat: Add new feature
-❌ feat: add new feature
-```
-
-### 4. Don't end with a period
-```bash
-✅ feat: Add user authentication
-❌ feat: Add user authentication.
-```
-
-### 5. Use scope to specify the area of change
-```bash
-feat(auth): Add login endpoint
-feat(user): Add profile page
-feat(api): Add rate limiting
-fix(database): Fix connection pool leak
-```
-
-## Advanced Usage
-
-### Breaking Changes
-```bash
-feat(api)!: Change authentication method to OAuth2
-
-BREAKING CHANGE: JWT authentication is replaced with OAuth2.
-Users need to update their authentication flow.
-```
-
-### Multiple paragraphs
-```bash
-feat(auth): Add two-factor authentication
-
-Implement TOTP-based 2FA using Google Authenticator.
-Users can enable 2FA in their account settings.
-
-Closes #123
-```
-
-### Linking issues
-```bash
-fix(parser): Fix null pointer exception
-
-Fixes #456
-Closes #789
-Related to #234
-```
-
-### Revert commits
-```bash
-revert: Revert "feat(auth): Add OAuth2 support"
-
-This reverts commit a1b2c3d4e5f6.
-Reason: OAuth2 implementation caused performance issues.
-```
-
-## Complete Examples
-
-### Example 1: New Feature
-```bash
-feat(auth): Add user signup API endpoint
-```
-
-### Example 2: Bug Fix
-```bash
-fix(parser): Fix null pointer exception in data parsing
-```
-
-### Example 3: Documentation
-```bash
-docs(readme): Update installation guidelines
-```
-
-### Example 4: Style Change
-```bash
-style(api): Apply Prettier formatting
-```
-
-### Example 5: Refactoring
-```bash
-refactor(user): Simplify UserService logic
-```
-
-### Example 6: Test
-```bash
-test(auth): Add test cases for login failures
-```
-
-### Example 7: Chore
-```bash
-chore: Add *.log to .gitignore
-```
-
-### Example 8: Performance
-```bash
-perf(database): Add index to user_id column
-```
-
-### Example 9: CI/CD
-```bash
-ci: Add automated testing workflow
-```
-
-### Example 10: Breaking Change
-```bash
-feat(api)!: Change response format to REST standard
-
-BREAKING CHANGE: API responses now follow REST conventions.
-Update client code to handle new response structure.
-```
-
-## Quick Reference
-
-| Type | Purpose | Example |
-|------|---------|---------|
-| `feat` | New feature | `feat(auth): Add login` |
-| `fix` | Bug fix | `fix(api): Fix CORS` |
-| `docs` | Documentation | `docs: Update README` |
-| `style` | Formatting | `style: Apply linter` |
-| `refactor` | Refactoring | `refactor: Clean up code` |
-| `test` | Testing | `test: Add unit tests` |
-| `chore` | Maintenance | `chore: Update deps` |
-| `perf` | Performance | `perf: Optimize query` |
-| `ci` | CI/CD | `ci: Add workflow` |
-| `build` | Build system | `build: Update config` |
-| `revert` | Revert | `revert: Revert commit` |
-
-## Tips
-
-1. **Be specific**: Include scope when possible
-2. **Be concise**: Keep subject line short and clear
-3. **Be consistent**: Follow team conventions
-4. **Be descriptive**: Explain what and why, not how
-5. **Use body**: Add details for complex changes
-
-## Common Scopes
-
-- `auth`: Authentication/Authorization
-- `api`: API endpoints
-- `ui`: User interface
-- `database`: Database changes
-- `config`: Configuration
-- `deps`: Dependencies
-- `security`: Security-related
-- `i18n`: Internationalization
-- `a11y`: Accessibility
-- `seo`: SEO-related
+- VectorWave version (`pip show vectorwave`)
+- Python version + OS
+- Whether the Rust core is loaded (look for the
+  `[VectorWave] Rust Core Activated!` log line)
+- A minimal reproduction or the relevant `vectorwave dev logs` output
