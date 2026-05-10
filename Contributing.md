@@ -151,6 +151,28 @@ A few things to double-check before opening a PR:
 - Lint is clean: `flake8 src/ --select=E9,F63,F7,F82`
 - The Rust extension still builds: `maturin develop`
 
+### Benchmarks
+
+Per-call overhead measurements live under `src/tests/benchmarks/` and are
+**skipped by default** so the regular suite stays fast. Run them
+explicitly:
+
+```bash
+# All benchmarks, with summary table
+pytest src/tests/benchmarks/ --benchmark-only
+
+# Save a baseline before a change, then compare after
+pytest src/tests/benchmarks/ --benchmark-only --benchmark-save=baseline
+# ... apply the change ...
+pytest src/tests/benchmarks/ --benchmark-only --benchmark-compare=baseline
+```
+
+Coverage is split between micro (single hot helper like
+`_capture_span_attributes`) and macro (full `@vectorize` wrapping a tiny
+function with the batch manager + alerter stubbed). Use the micro
+numbers to justify a Rust port of a specific helper before opening
+that surgery.
+
 ### Pre-commit hook for secret leaks
 
 A pre-commit hook scans staged files for OpenAI / Anthropic / AWS keys and
