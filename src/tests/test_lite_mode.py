@@ -143,3 +143,125 @@ def test_lite_mode_does_not_touch_weaviate(lite_mode_env, monkeypatch):
     # Allow the batch worker thread to drain.
     time.sleep(0.5)
     assert calls == [], f"Lite mode unexpectedly called Weaviate: {calls}"
+
+
+# ---------------------------------------------------------------------------
+# Extended Lite coverage — proves the migrated paths (archiver, dataset,
+# replayer, semantic-cache search helpers) work end-to-end without Weaviate.
+# ---------------------------------------------------------------------------
+
+import json
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from vectorwave.database.archiver import VectorWaveArchiver
+from vectorwave.database.dataset import VectorWaveDatasetManager
+from vectorwave.database.db_search import (
+    search_similar_execution,
+    check_semantic_drift,
+)
+from vectorwave.utils.replayer import VectorWaveReplayer
+
+
+def _seed_row(store, settings, *, function_name, return_value, vector=None, status="SUCCESS"):
+    return store.insert(
+        collection=settings.EXECUTION_COLLECTION_NAME,
+        properties={
+            "function_uuid": str(uuid4()),
+            "function_name": function_name,
+            "status": status,
+            "duration_ms": 1.0,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "return_value": json.dumps(return_value) if not isinstance(return_value, str) else return_value,
+        },
+        vector=vector,
+    )
+
+
+def test_lite_mode_archiver_export_and_clear(lite_mode_env, tmp_path):
+    """archiver.export_and_clear writes JSONL and removes rows in Lite mode."""
+    settings = lite_mode_env
+    from vectorwave.store import get_vector_store
+    store = get_vector_store()
+
+    for v in ["a", "b"]:
+        _seed_row(store, settings, function_name="lite_arch", return_value=v)
+
+    out = tmp_path / "out" / "data.jsonl"
+    archiver = VectorWaveArchiver()
+    result = archiver.export_and_clear(
+        function_name="lite_arch",
+        output_file=str(out),
+        clear_after_export=True,
+    )
+    assert result["exported"] == 2
+    assert result["deleted"] == 2
+    assert out.exists()
+
+
+def test_lite_mode_dataset_register_as_golden(lite_mode_env):
+    """register_as_golden copies a SUCCESS log + its vector into the golden collection."""
+    settings = lite_mode_env
+    from vectorwave.store import get_vector_store
+    store = get_vector_store()
+    store.ensure_collection(settings.GOLDEN_COLLECTION_NAME, properties=[])
+
+    uuid_str = _seed_row(
+        store, settings, function_name="lite_golden",
+        return_value="r1", vector=[0.1] * 384,
+    )
+
+    manager = VectorWaveDatasetManager()
+    assert manager.register_as_golden(uuid_str, note="lite test") is True
+
+    golden_rows = store.query(settings.GOLDEN_COLLECTION_NAME, limit=10)
+    assert len(golden_rows) == 1
+    assert golden_rows[0].properties.get("original_uuid") == uuid_str
+
+
+def test_lite_mode_search_similar_execution(lite_mode_env):
+    """search_similar_execution finds the nearest SUCCESS row for a function."""
+    settings = lite_mode_env
+    from vectorwave.store import get_vector_store
+    store = get_vector_store()
+
+    # `return_value=` is passed as already-stringified, so _seed_row stores "hit"
+    # verbatim (not JSON-encoded). That's the on-disk shape we read back.
+    _seed_row(store, settings, function_name="lite_cache", return_value="hit", vector=[1.0] * 384)
+
+    result = search_similar_execution(
+        query_vector=[1.0] * 384,
+        function_name="lite_cache",
+        threshold=0.5,
+        limit=1,
+    )
+    assert result is not None
+    assert result["return_value"] == "hit"
+
+
+def test_lite_mode_check_semantic_drift_returns_safely(lite_mode_env):
+    """drift detection: returns False/None safely when no matching rows exist
+    and runs through the store cleanly when rows are present."""
+    settings = lite_mode_env
+    from vectorwave.store import get_vector_store
+    store = get_vector_store()
+
+    is_drift, avg_dist, nearest = check_semantic_drift(
+        vector=[0.0] * 384,
+        function_name="nonexistent_fn",
+        threshold=0.5,
+        k=5,
+    )
+    assert is_drift is False
+    assert avg_dist == 0.0
+    assert nearest is None
+
+    _seed_row(store, settings, function_name="lite_drift", return_value="ok", vector=[1.0] * 384)
+    is_drift2, avg_dist2, nearest2 = check_semantic_drift(
+        vector=[1.0] * 384,
+        function_name="lite_drift",
+        threshold=10.0,
+        k=5,
+    )
+    assert is_drift2 is False
+    assert nearest2 is not None

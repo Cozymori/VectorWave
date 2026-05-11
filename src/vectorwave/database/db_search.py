@@ -14,7 +14,6 @@ from weaviate.classes.query import Filter
 _PROP_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 from ..models.db_config import get_weaviate_settings, WeaviateSettings
-from .db import get_cached_client
 from ..exception.exceptions import WeaviateConnectionError
 from ..vectorizer.factory import get_vectorizer
 from weaviate.classes.aggregate import Metrics
@@ -84,28 +83,24 @@ def search_errors_by_message(
         limit: int = 5,
         filters: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
-    # ... (No changes needed here)
     """
-    [NEW] Searches the 'VectorWaveExecutions' collection for
-    semantically similar error logs using a natural language query.
+    Searches the executions collection for semantically similar error logs.
+    Routes through the VectorStore so it works in both Pro and Lite modes.
     """
     try:
+        from ..store import get_vector_store
         settings: WeaviateSettings = get_weaviate_settings()
-        client: weaviate.WeaviateClient = get_cached_client()
+        store = get_vector_store()
 
-        collection = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
-
-        # [NEW] By default, only search for logs with "ERROR" status
         base_filters = {"status": "ERROR"}
         if filters:
             base_filters.update(filters)
 
-        weaviate_filter = _build_weaviate_filters(base_filters)
-
         vectorizer = get_vectorizer()
         if vectorizer is None:
             logger.error(
-                "Cannot perform vector search: No Python vectorizer (e.g., 'huggingface' or 'openai_client') is configured in .env.")
+                "Cannot perform vector search: No Python vectorizer (huggingface / openai_client) configured."
+            )
             raise WeaviateConnectionError("Cannot perform vector search: No Python vectorizer configured.")
 
         try:
@@ -115,84 +110,64 @@ def search_errors_by_message(
             logger.error(f"Query vectorization failed: {e}")
             raise WeaviateConnectionError(f"Query vectorization failed: {e}")
 
-        logger.info(f"Performing near_vector search for errors matching: '{query}'")
-        response = collection.query.near_vector(
-            near_vector=query_vector,
+        records = store.near_vector(
+            collection=settings.EXECUTION_COLLECTION_NAME,
+            vector=query_vector,
+            filters=base_filters,
             limit=limit,
-            filters=weaviate_filter,
-            # [NEW] Return metadata (distance) along with properties useful for error analysis
-            return_metadata=wvc.query.MetadataQuery(distance=True),
             return_properties=[
                 "function_name", "error_message", "error_code",
-                "timestamp_utc", "trace_id", "parent_span_id", "span_id"
-            ]
+                "timestamp_utc", "trace_id", "parent_span_id", "span_id",
+            ],
         )
-
-        results = [
-            {
-                "properties": obj.properties,
-                "metadata": obj.metadata,
-                "uuid": obj.uuid
-            }
-            for obj in response.objects
+        return [
+            {"properties": r.properties, "metadata": {"distance": r.distance}, "uuid": r.uuid}
+            for r in records
         ]
-        return results
 
     except Exception as e:
-        logger.error("Error during Weaviate error search: %s", e)
+        logger.error("Error during error-message search: %s", e)
         raise WeaviateConnectionError(f"Failed to execute 'search_errors_by_message': {e}")
 
 
 def search_functions(query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    # ... (No changes needed here)
     """
-    Searches function definitions from the [VectorWaveFunctions] collection using natural language (nearText).
+    Searches the functions collection. Requires a Python-side vectorizer
+    (HuggingFace / OpenAI client) so we always go through near_vector — the
+    legacy `near_text` path needed Weaviate's text2vec module, which Lite
+    mode doesn't have. Pro users without a Python vectorizer should set
+    VECTORIZER=huggingface (default) to keep using this function.
     """
     try:
+        from ..store import get_vector_store
         settings: WeaviateSettings = get_weaviate_settings()
-        client: weaviate.WeaviateClient = get_cached_client()
-
-        collection = client.collections.get(settings.COLLECTION_NAME)
-        weaviate_filter = _build_weaviate_filters(filters)
+        store = get_vector_store()
 
         vectorizer = get_vectorizer()
-
-        if vectorizer is not None:
-            print("[VectorWave] Searching with Python client (near_vector)...")
-            try:
-                query_vector = vectorizer.embed(query)
-            except Exception as e:
-                print(f"Error vectorizing query with Python client: {e}")
-                raise WeaviateConnectionError(f"Query vectorization failed: {e}")
-
-            response = collection.query.near_vector(
-                near_vector=query_vector,
-                limit=limit,
-                filters=weaviate_filter,
-                return_metadata=wvc.query.MetadataQuery(distance=True)
+        if vectorizer is None:
+            raise WeaviateConnectionError(
+                "search_functions requires a Python-side vectorizer. "
+                "Set VECTORIZER=huggingface (default) or 'openai_client'."
             )
 
-        else:
-            print("[VectorWave] Searching with Weaviate module (near_text)...")
-            response = collection.query.near_text(
-                query=query,
-                limit=limit,
-                filters=weaviate_filter,
-                return_metadata=wvc.query.MetadataQuery(distance=True)
-            )
+        try:
+            query_vector = vectorizer.embed(query)
+        except Exception as e:
+            raise WeaviateConnectionError(f"Query vectorization failed: {e}")
 
-        results = [
-            {
-                "properties": obj.properties,
-                "metadata": obj.metadata,
-                "uuid": obj.uuid
-            }
-            for obj in response.objects
+        records = store.near_vector(
+            collection=settings.COLLECTION_NAME,
+            vector=query_vector,
+            filters=filters,
+            limit=limit,
+        )
+        return [
+            {"properties": r.properties, "metadata": {"distance": r.distance}, "uuid": r.uuid}
+            for r in records
         ]
-        return results
 
     except Exception as e:
-        logger.error("Error during Weaviate search: %s", e)
+        logger.error("Error during function search: %s", e)
         raise WeaviateConnectionError(f"Failed to execute 'search_functions': {e}")
 
 
@@ -238,58 +213,51 @@ def search_similar_execution(
         function_name: str,
         threshold: float = 0.9,
         limit: int = 1,
-        filters: Optional[Dict[str, Any]] = None  # [NEW] 인자 추가
+        filters: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Searches the 'VectorWaveExecutions' collection with optional filters.
+    Searches the executions collection for the nearest SUCCESS log to a query
+    vector. Routes through the VectorStore so it works in both Pro and Lite.
     """
     try:
+        from ..store import get_vector_store
         settings: WeaviateSettings = get_weaviate_settings()
-        client: weaviate.WeaviateClient = get_cached_client()
-
-        collection = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        store = get_vector_store()
 
         base_filters = {
             "status": "SUCCESS",
-            "function_name": function_name
+            "function_name": function_name,
         }
-
-        # [NEW] 사용자 필터 병합
         if filters:
             base_filters.update(filters)
 
-        weaviate_filter = _build_weaviate_filters(base_filters)
-
-        certainty_threshold = threshold
-
         logger.info(
-            f"Performing near_vector cache search for '{function_name}' with certainty >= {certainty_threshold}")
-
-        response = collection.query.near_vector(
-            near_vector=query_vector,
-            limit=limit,
-            filters=weaviate_filter,
-            certainty=certainty_threshold,
-            return_metadata=wvc.query.MetadataQuery(distance=True, certainty=True),
-            return_properties=["return_value", "timestamp_utc"]
+            f"Performing near_vector cache search for '{function_name}' with certainty >= {threshold}"
         )
 
-        if response.objects:
-            best_match = response.objects[0]
-            result = {
-                'return_value': best_match.properties.get('return_value'),
-                'metadata': {
-                    'distance': best_match.metadata.distance,
-                    'certainty': best_match.metadata.certainty,
-                },
-                'uuid': str(best_match.uuid)
-            }
-            return result
+        records = store.near_vector(
+            collection=settings.EXECUTION_COLLECTION_NAME,
+            vector=query_vector,
+            filters=base_filters,
+            certainty=threshold,
+            limit=limit,
+            return_properties=["return_value", "timestamp_utc"],
+        )
 
+        if records:
+            best = records[0]
+            return {
+                "return_value": best.properties.get("return_value"),
+                "metadata": {
+                    "distance": best.distance,
+                    "certainty": best.certainty,
+                },
+                "uuid": best.uuid,
+            }
         return None
 
     except Exception as e:
-        logger.error(f"Error during Weaviate cache search for '{function_name}': {e}", exc_info=True)
+        logger.error(f"Error during cache search for '{function_name}': {e}", exc_info=True)
         return None
 
 
@@ -299,11 +267,21 @@ def search_functions_hybrid(
         filters: Optional[Dict[str, Any]] = None,
         alpha: float = 0.5
 ) -> List[Dict[str, Any]]:
-    # ... (No changes needed here)
     """
     Performs Hybrid Search (Keyword + Vector) on function definitions.
+
+    **Pro-only.** Hybrid search (BM25 + vector with a tunable alpha) is a
+    Weaviate-specific feature; Lite mode (LanceDB) has no equivalent yet.
+    Lite users should call `search_functions` (pure vector) instead.
     """
+    import os
+    if os.environ.get("VECTORWAVE_MODE", "pro").lower() == "lite":
+        raise WeaviateConnectionError(
+            "search_functions_hybrid is a Pro-only feature. "
+            "Use search_functions for pure vector search in Lite mode."
+        )
     try:
+        from ..database.db import get_cached_client
         settings: WeaviateSettings = get_weaviate_settings()
         client: weaviate.WeaviateClient = get_cached_client()
 
@@ -364,41 +342,38 @@ def check_semantic_drift(
         threshold: float,
         k: int = 5
 ) -> Tuple[bool, float, Optional[str]]:
-    # ... (No changes needed here)
     """
-    KNN based semantic drift check.
+    KNN-based semantic drift check. Routes through the VectorStore so it works
+    in both Pro and Lite modes.
     """
     try:
+        from ..store import get_vector_store
         settings = get_weaviate_settings()
-        client = get_cached_client()
-        collection = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        store = get_vector_store()
 
-        response = collection.query.near_vector(
-            near_vector=vector,
+        records = store.near_vector(
+            collection=settings.EXECUTION_COLLECTION_NAME,
+            vector=vector,
+            filters={"function_name": function_name, "status": "SUCCESS"},
             limit=k,
-            filters=(
-                    wvc.query.Filter.by_property("function_name").equal(function_name) &
-                    wvc.query.Filter.by_property("status").equal("SUCCESS")
-            ),
-            return_metadata=wvc.query.MetadataQuery(distance=True),
-            return_properties=[]
+            return_properties=[],
         )
 
-        objects = response.objects
-        if not objects:
+        if not records:
             return False, 0.0, None
 
-        distances = [obj.metadata.distance for obj in objects]
+        distances = [r.distance for r in records if r.distance is not None]
+        if not distances:
+            return False, 0.0, None
+
         avg_distance = sum(distances) / len(distances)
-
-        nearest_uuid = str(objects[0].uuid)
-
+        nearest_uuid = records[0].uuid
         is_drift = avg_distance > threshold
 
         if is_drift:
             logger.warning(
                 f"🚨 [Semantic Drift] '{function_name}' detected anomaly! "
-                f"Avg Distance (k={len(objects)}): {avg_distance:.4f} (Threshold: {threshold})"
+                f"Avg Distance (k={len(distances)}): {avg_distance:.4f} (Threshold: {threshold})"
             )
 
         return is_drift, avg_distance, nearest_uuid
@@ -462,21 +437,19 @@ def simulate_drift_check(
 
 
 def get_token_usage_stats() -> Dict[str, int]:
-    # ... (No changes needed here)
-    """VectorWaveTokenUsage collections based analysis"""
+    """VectorWaveTokenUsage collection based analysis. Works in both modes."""
     try:
-        client = get_cached_client()
-        if not client.collections.exists("VectorWaveTokenUsage"):
+        from ..store import get_vector_store
+        store = get_vector_store()
+        if not store.collection_exists("VectorWaveTokenUsage"):
             logger.warning("VectorWaveTokenUsage collection does not exist.")
             return {"total_tokens": 0}
 
-        usage_col = client.collections.get("VectorWaveTokenUsage")
-
         total_tokens = 0
-        stats = {}
+        stats: Dict[str, int] = {}
 
-        for obj in usage_col.iterator():
-            props = obj.properties
+        for rec in store.iterate("VectorWaveTokenUsage"):
+            props = rec.properties
             tokens = int(props.get("tokens", 0))
             category = props.get("category", "unknown")
 

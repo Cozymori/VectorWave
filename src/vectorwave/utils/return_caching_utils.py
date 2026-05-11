@@ -5,17 +5,15 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from weaviate.util import generate_uuid5
-import weaviate.classes.query as wvc_query
-from weaviate.classes.query import Filter
 
 from ..models.db_config import get_weaviate_settings, WeaviateSettings
 from ..monitoring.tracer import _create_input_vector_data, current_tracer_var, \
     current_span_id_var
 from .serialization import deserialize_return_value as _deserialize_return_value
-from ..database.db_search import search_similar_execution, _build_weaviate_filters
+from ..database.db_search import search_similar_execution
 from ..vectorizer.factory import get_vectorizer
 from ..batch.batch import get_batch_manager
-from ..database.db import get_cached_client
+from ..store import get_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -64,32 +62,29 @@ def _check_and_return_cached_result(
         input_vector = vectorizer.embed(input_vector_data['text'])
 
         # (C) Priority 1: Search Golden Dataset
-        client = get_cached_client()
+        store = get_vector_store()
         golden_match = None
 
+        golden_filters: Dict[str, Any] = {"function_name": function_name}
+        if filters:
+            golden_filters.update(filters)
+
         try:
-            golden_col = client.collections.get(settings.GOLDEN_COLLECTION_NAME)
-
-            base_filter_obj = wvc_query.Filter.by_property("function_name").equal(function_name)
-            extra_filter_obj = _build_weaviate_filters(filters)
-
-            final_filters = base_filter_obj
-            if extra_filter_obj:
-                final_filters = Filter.all_of([base_filter_obj, extra_filter_obj])
-
-            response = golden_col.query.near_vector(
-                near_vector=input_vector,
-                limit=1,
-                filters=final_filters,
+            golden_records = store.near_vector(
+                collection=settings.GOLDEN_COLLECTION_NAME,
+                vector=input_vector,
+                filters=golden_filters,
                 certainty=cache_threshold,
+                limit=1,
                 return_properties=["return_value", "original_uuid"],
-                return_metadata=wvc_query.MetadataQuery(distance=True, certainty=True)
             )
 
-            if response.objects:
-                golden_match = response.objects[0]
-                logger.info(f"🌟 [Golden Cache Hit] '{function_name}' found in Golden Dataset. (Distance: {golden_match.metadata.distance:.4f})")
-
+            if golden_records:
+                golden_match = golden_records[0]
+                logger.info(
+                    f"🌟 [Golden Cache Hit] '{function_name}' found in Golden Dataset. "
+                    f"(Distance: {golden_match.distance:.4f})"
+                )
         except Exception as e:
             logger.warning(f"Golden cache search failed: {e}")
 
@@ -99,12 +94,12 @@ def _check_and_return_cached_result(
 
         if golden_match:
             cached_log = {
-                'return_value': golden_match.properties.get('return_value'),
-                'metadata': {
-                    'distance': golden_match.metadata.distance,
-                    'certainty': golden_match.metadata.certainty,
+                "return_value": golden_match.properties.get("return_value"),
+                "metadata": {
+                    "distance": golden_match.distance,
+                    "certainty": golden_match.certainty,
                 },
-                'uuid': str(golden_match.uuid)
+                "uuid": golden_match.uuid,
             }
             is_golden_hit = True
         else:

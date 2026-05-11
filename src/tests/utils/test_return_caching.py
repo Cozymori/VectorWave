@@ -52,50 +52,40 @@ def mock_caching_utils_deps(monkeypatch):
 def mock_caching_utils_deps_v2(monkeypatch):
     """
     Enhanced Mock Fixture for Golden Dataset testing.
-    Mocks Client, Golden Collection, and Standard Search.
+    Mocks VectorStore (golden hit/miss), search_similar_execution, vectorizer, batch.
     """
-    # Settings Mock
     mock_settings = WeaviateSettings(
         EXECUTION_COLLECTION_NAME="Executions",
         GOLDEN_COLLECTION_NAME="GoldenData"
     )
     mock_get_settings = MagicMock(return_value=mock_settings)
 
-    # Client & Golden Collection Mock
-    mock_client = MagicMock()
-    mock_golden_col = MagicMock()
+    # Backend-agnostic VectorStore mock — golden hits go through store.near_vector
+    mock_store = MagicMock()
+    mock_store.near_vector.return_value = []  # default: golden miss
+    mock_get_store = MagicMock(return_value=mock_store)
 
-    def get_collection_side_effect(name):
-        if name == "GoldenData": return mock_golden_col
-        return MagicMock()
-
-    mock_client.collections.get.side_effect = get_collection_side_effect
-    mock_get_client = MagicMock(return_value=mock_client)
-
-    # Vectorizer Mock
     mock_vectorizer = MagicMock()
     mock_vectorizer.embed.return_value = [0.1, 0.2]
     mock_get_vectorizer = MagicMock(return_value=mock_vectorizer)
 
-    # Batch Mock
     mock_batch = MagicMock()
     mock_get_batch = MagicMock(return_value=mock_batch)
 
-    # Patching
     TARGET = "vectorwave.utils.return_caching_utils"
     monkeypatch.setattr(f"{TARGET}.get_weaviate_settings", mock_get_settings)
-    monkeypatch.setattr(f"{TARGET}.get_cached_client", mock_get_client)
+    monkeypatch.setattr(f"{TARGET}.get_vector_store", mock_get_store)
     monkeypatch.setattr(f"{TARGET}.get_vectorizer", mock_get_vectorizer)
     monkeypatch.setattr(f"{TARGET}.get_batch_manager", mock_get_batch)
 
-    # Important: Mock search_similar_execution (Standard Search)
+    # Mock search_similar_execution (standard search fallback)
     mock_search_std = MagicMock(return_value=None)
     monkeypatch.setattr(f"{TARGET}.search_similar_execution", mock_search_std)
 
     return {
-        "golden_col": mock_golden_col,
+        "store": mock_store,
         "search_std": mock_search_std,
-        "batch": mock_batch
+        "batch": mock_batch,
     }
 
 
@@ -112,12 +102,12 @@ def test_check_and_return_cached_result_cache_hit_logging(mock_caching_utils_dep
         "uuid": "cached-log-uuid"
     }
 
-    # [NEW] Mock Client for Golden Dataset check (Return empty -> fall through to search_similar_execution)
-    mock_client = MagicMock()
-    mock_client.collections.get.return_value.query.near_vector.return_value.objects = []
+    # Mock VectorStore so the Golden lookup returns nothing -> fall through to
+    # the standard `search_similar_execution` path.
+    mock_store = MagicMock()
+    mock_store.near_vector.return_value = []
 
-    # [FIX] Patch get_cached_client
-    with patch("vectorwave.utils.return_caching_utils.get_cached_client", return_value=mock_client):
+    with patch("vectorwave.utils.return_caching_utils.get_vector_store", return_value=mock_store):
         with patch("vectorwave.utils.return_caching_utils.search_similar_execution", return_value=mock_cached_log):
             with patch("vectorwave.utils.return_caching_utils.current_tracer_var") as mock_tracer_var:
                 with patch("vectorwave.utils.return_caching_utils.current_span_id_var") as mock_span_var:
@@ -167,12 +157,16 @@ def test_cache_priority_golden_hit(mock_caching_utils_deps_v2):
     """
     deps = mock_caching_utils_deps_v2
 
-    # Arrange: Golden search result exists (Hit)
-    mock_obj = MagicMock()
-    mock_obj.properties = {"return_value": '"GoldenResult"', "original_uuid": "orig-1"}
-    mock_obj.metadata.distance = 0.0
-    mock_obj.metadata.certainty = 1.0
-    deps["golden_col"].query.near_vector.return_value.objects = [mock_obj]
+    # Arrange: VectorStore golden lookup returns a StoreRecord (hit)
+    from vectorwave.store.base import StoreRecord
+    deps["store"].near_vector.return_value = [
+        StoreRecord(
+            uuid="golden-1",
+            properties={"return_value": '"GoldenResult"', "original_uuid": "orig-1"},
+            distance=0.0,
+            certainty=1.0,
+        )
+    ]
 
     # Act
     result = _check_and_return_cached_result(
@@ -181,9 +175,9 @@ def test_cache_priority_golden_hit(mock_caching_utils_deps_v2):
 
     # Assert
     assert result == "GoldenResult"
-    # Check if Golden Collection search was called
-    deps["golden_col"].query.near_vector.assert_called_once()
-    # Standard search (search_similar_execution) should not be called (Verify Priority Logic)
+    # Golden lookup was called
+    deps["store"].near_vector.assert_called_once()
+    # Standard search should not be called (Verify Priority Logic)
     deps["search_std"].assert_not_called()
 
 
@@ -193,10 +187,9 @@ def test_cache_priority_golden_miss_fallback(mock_caching_utils_deps_v2):
     """
     deps = mock_caching_utils_deps_v2
 
-    # Arrange: No result in Golden search (Miss)
-    deps["golden_col"].query.near_vector.return_value.objects = []
+    # Arrange: Golden returns empty -> fallback to standard search
+    deps["store"].near_vector.return_value = []
 
-    # Set Standard search result (Hit)
     deps["search_std"].return_value = {
         "return_value": '"StdResult"',
         "metadata": {"distance": 0.1, "certainty": 0.9},
@@ -211,5 +204,5 @@ def test_cache_priority_golden_miss_fallback(mock_caching_utils_deps_v2):
     # Assert
     assert result == "StdResult"
     # Both should have been called
-    deps["golden_col"].query.near_vector.assert_called_once()
+    deps["store"].near_vector.assert_called_once()
     deps["search_std"].assert_called_once()

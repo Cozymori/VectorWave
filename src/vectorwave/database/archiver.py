@@ -1,14 +1,14 @@
 import json
 import os
-from typing import Dict, Any, List
-import weaviate.classes.query as wvc_query  # Using Weaviate v4 filters
-from .db import get_cached_client           # Import within the same package
+from typing import Dict, Any
 from ..models.db_config import get_weaviate_settings
+from ..store import get_vector_store
+
 
 class VectorWaveArchiver:
     def __init__(self):
-        self.client = get_cached_client()
         self.settings = get_weaviate_settings()
+        self.store = get_vector_store()
         self.collection_name = self.settings.EXECUTION_COLLECTION_NAME
 
     def export_and_clear(self,
@@ -17,27 +17,24 @@ class VectorWaveArchiver:
                          clear_after_export: bool = False,
                          delete_only: bool = False) -> Dict[str, int]:
         """
-        Exports execution logs or cleans them up from the database.
+        Exports execution logs or cleans them up from the backend store.
+        Routes through the VectorStore interface so the same flow works in
+        Pro (Weaviate) and Lite (LanceDB) modes.
         """
-        collection = self.client.collections.get(self.collection_name)
-
-        # 1. Configure the filter
-        filters = wvc_query.Filter.by_property("function_name").equal(function_name)
-
-        # Filter only successful logs if it's for training export
+        # 1. Configure the filter. Non-delete-only mode also requires SUCCESS.
+        filters: Dict[str, Any] = {"function_name": function_name}
         if not delete_only:
-            filters = filters & wvc_query.Filter.by_property("status").equal("SUCCESS")
+            filters["status"] = "SUCCESS"
 
         # 2. Retrieve data
-        # UUID is automatically included in the fetch_objects result object (obj.uuid).
-        response = collection.query.fetch_objects(
+        records = self.store.query(
+            collection=self.collection_name,
             filters=filters,
             limit=10000,
-            return_properties=["return_value", "timestamp_utc"]
+            return_properties=["return_value", "timestamp_utc"],
         )
 
-        objects = response.objects
-        if not objects:
+        if not records:
             return {"exported": 0, "deleted": 0}
 
         exported_count = 0
@@ -51,38 +48,42 @@ class VectorWaveArchiver:
                 os.makedirs(os.path.dirname(output_file) or '.', exist_ok=True)
 
                 with open(output_file, 'a', encoding='utf-8') as f:
-                    for obj in objects:
-                        data_entry = self._convert_to_training_format(obj)
+                    for rec in records:
+                        data_entry = self._convert_to_training_format(rec)
                         f.write(json.dumps(data_entry, ensure_ascii=False) + "\n")
-                        uuids_to_delete.append(obj.uuid)
+                        uuids_to_delete.append(rec.uuid)
                         exported_count += 1
                 print(f"✅ [Export] {exported_count} records saved: {output_file}")
             except Exception as e:
                 print(f"❌ [Error] Failed to save file: {e}")
-                return {"exported": 0, "deleted": 0} # Stop deletion upon save failure
+                return {"exported": 0, "deleted": 0}  # Stop deletion upon save failure
         else:
-            # If in delete-only mode, add all retrieved objects to the deletion list
-            uuids_to_delete = [obj.uuid for obj in objects]
+            # If in delete-only mode, every retrieved row goes to delete list
+            uuids_to_delete = [rec.uuid for rec in records]
 
-        # 4. Delete from DB (if option is enabled)
+        # 4. Delete from store (if option is enabled)
         if (clear_after_export or delete_only) and uuids_to_delete:
             try:
-                # Use Weaviate v4 delete_many
-                result = collection.data.delete_many(
-                    where=wvc_query.Filter.by_id().contains_any(uuids_to_delete)
+                deleted_count = self.store.delete_by_filter(
+                    collection=self.collection_name,
+                    filters=filters,
                 )
-                deleted_count = result.successful
-                print(f"🗑️ [Clear] {deleted_count} records deleted from DB.")
+                print(f"🗑️ [Clear] {deleted_count} records deleted.")
             except Exception as e:
-                print(f"❌ [Error] DB deletion failed: {e}")
+                print(f"❌ [Error] Delete failed: {e}")
 
         return {"exported": exported_count, "deleted": deleted_count}
 
-    def _convert_to_training_format(self, obj) -> Dict[str, Any]:
+    def _convert_to_training_format(self, rec) -> Dict[str, Any]:
         """
-        Converts logs to LLM fine-tuning format (JSONL)
+        Converts a StoreRecord (or any object with `.properties` + `.uuid`) into
+        an LLM fine-tuning JSONL row.
         """
-        props = obj.properties
+        # Accepts either a StoreRecord or a dict (for backwards compatibility).
+        if hasattr(rec, "properties"):
+            props = rec.properties
+        else:
+            props = rec
         exclude_keys = {
             'status', 'duration_ms', 'timestamp_utc', 'error_message', 'error_code',
             'return_value', 'function_name', 'trace_id', 'span_id', 'parent_span_id',
