@@ -42,7 +42,19 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: pytest -m "live" --tb=short
+        # pytest exits with code 5 when nothing matches the `live` marker —
+        # that's an expected state until someone adds the first live test, not
+        # a failure. Swallow code 5; surface every other exit code.
+        run: |
+          set +e
+          pytest -m "live" --tb=short
+          code=$?
+          set -e
+          if [ $code -eq 5 ]; then
+            echo "::notice::No @pytest.mark.live tests collected — skipping."
+            exit 0
+          fi
+          exit $code
 
       - name: Notify on failure
         if: failure()
