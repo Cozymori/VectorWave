@@ -289,7 +289,7 @@ def cmd_info(_args: argparse.Namespace) -> int:
         age_str = f"{age // 3600}h{(age % 3600) // 60}m" if age >= 3600 else f"{age // 60}m{age % 60}s"
         otel = f"on:{p.otel_service_name}" if p.otel_enabled else "off"
         rust = "yes" if p.rust_core else "py"
-        mods = ",".join(p.instrumented_modules) or "(decorator)"
+        mods = ",".join(p.instrumented_modules) or "-"
         if len(mods) > 50:
             mods = mods[:47] + "..."
         rows.append((str(p.pid), p.mode, otel, rust, age_str, mods))

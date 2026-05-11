@@ -51,6 +51,28 @@ def test_activate_captures_otel_state(tmp_path, monkeypatch):
     rt.deactivate()
 
 
+def test_vectorize_registers_module_for_indicator(tmp_path, monkeypatch):
+    """@vectorize on a function should also populate
+    `vectorwave info`'s MODULES column — not just VectorWaveAutoInjector."""
+    monkeypatch.setenv("VECTORWAVE_RUN_DIR", str(tmp_path))
+    monkeypatch.setenv("VECTORWAVE_QUIET", "1")
+    rt = _reload_runtime()
+    rt.activate()
+
+    # Import path: hit register_instrumented_module via the decorator. Source
+    # inspection inside `@vectorize` fails for functions defined in tests so we
+    # tolerate the inner error path — the registration must happen regardless.
+    from vectorwave.core.decorator import vectorize
+
+    @vectorize(search_description="x", sequence_narrative="x")
+    def _module_indicator_target():
+        return 1
+
+    info = rt.get_info()
+    assert __name__ in info.instrumented_modules
+    rt.deactivate()
+
+
 def test_register_instrumented_module_persists(tmp_path, monkeypatch):
     monkeypatch.setenv("VECTORWAVE_RUN_DIR", str(tmp_path))
     monkeypatch.setenv("VECTORWAVE_QUIET", "1")
