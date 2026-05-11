@@ -112,7 +112,17 @@ def _clear_vectorwave_singletons():
     from vectorwave.database.db import get_cached_client
     from vectorwave.vectorizer.factory import get_vectorizer
     from vectorwave.batch.batch import get_batch_manager as _gbm
-    for fn in (get_weaviate_settings, get_cached_client, get_vectorizer, _gbm):
+    # Also drop the VectorStore singleton — Lite-mode tests that ran earlier
+    # cache a LanceVectorStore here, which would silently serve Pro-mode
+    # `store.query` calls against an empty LanceDB and break the e2e suite.
+    try:
+        from vectorwave.store.factory import get_vector_store
+    except ImportError:
+        get_vector_store = None
+    targets = [get_weaviate_settings, get_cached_client, get_vectorizer, _gbm]
+    if get_vector_store is not None:
+        targets.append(get_vector_store)
+    for fn in targets:
         if hasattr(fn, "cache_clear"):
             fn.cache_clear()
 
@@ -197,9 +207,19 @@ def weaviate_container():
 
 
 @pytest.fixture
-def clean_weaviate(weaviate_container):
-    """Function-scoped fixture: deletes VectorWave collections before and after each test."""
+def clean_weaviate(weaviate_container, monkeypatch):
+    """Function-scoped fixture: deletes VectorWave collections before and after each test.
+
+    Also forces VECTORWAVE_MODE=pro and drops the VectorStore singleton so a
+    Lite-mode test that ran earlier in the session doesn't leave a cached
+    LanceVectorStore in place — it would silently serve `store.query` calls
+    against an empty LanceDB and make Pro-mode e2e assertions fail.
+    """
     from vectorwave.database.db import get_weaviate_client
+    from vectorwave.store.factory import get_vector_store
+
+    monkeypatch.setenv("VECTORWAVE_MODE", "pro")
+    get_vector_store.cache_clear()
 
     def _wipe():
         client = get_weaviate_client()
