@@ -42,6 +42,35 @@ metadata, execution logs, basic filter/sort fetch via
 modular vectorizers (`text2vec-openai` etc.) remain Pro-only — see
 issue #95 for the migration roadmap.
 
+## OpenTelemetry export
+
+VectorWave can mirror every span to an OpenTelemetry exporter so traces show
+up in Jaeger / Tempo / DataDog / Honeycomb alongside the Weaviate row
+(issue #29).
+
+```bash
+pip install -e ".[otel]"
+
+# Opt in
+export OTEL_ENABLED=true
+export OTEL_SERVICE_NAME=my-app
+
+# Pick an exporter:
+#   stdout (default — useful while developing)
+#   OTLP/gRPC — set OTEL_EXPORTER_OTLP_ENDPOINT to your collector
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+```
+
+Standard OTel env vars work (`OTEL_RESOURCE_ATTRIBUTES`,
+`OTEL_EXPORTER_OTLP_HEADERS`, ...). VectorWave's own ids are carried as
+attributes (`vectorwave.trace_id`, `vectorwave.span_id`,
+`vectorwave.parent_span_id`) so you can correlate the OTel trace back to
+the row in `VectorWaveExecutions`.
+
+The emitter is non-fatal — if SDK init or the exporter fails, the span
+emit is skipped and the wrapped function keeps running. Telemetry must
+never break the user's code path.
+
 ## Dev environment CLI
 
 `vectorwave dev` manages a containerised Weaviate + console stack so you

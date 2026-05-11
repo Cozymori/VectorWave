@@ -327,6 +327,27 @@ def _perform_background_logging(ctx: SpanContext):
             except Exception as e:
                 logger.error("Failed to log span: %s", e)
 
+        # 9. Optional OTel mirror (issue #29). Emits an equivalent span to
+        # whatever OTel exporter is configured so traces show up in Jaeger /
+        # Tempo / DataDog alongside the Weaviate row. No-op unless
+        # OTEL_ENABLED=true.
+        try:
+            from .otel import emit_span as _otel_emit_span, is_otel_enabled
+            if is_otel_enabled():
+                duration_s = float(span_properties.get("duration_ms", 0.0)) / 1000.0
+                # start_time is captured via time.perf_counter; convert to a
+                # wall-clock ns timestamp for OTel.
+                import time as _time
+                end_time_ns = _time.time_ns()
+                start_time_ns = end_time_ns - int(duration_s * 1e9)
+                _otel_emit_span(
+                    span_properties,
+                    start_time_ns=start_time_ns,
+                    end_time_ns=end_time_ns,
+                )
+        except Exception as e:
+            logger.debug(f"OTel emit skipped: {e}")
+
     except Exception as e:
         logger.error(f"Background logging failed for '{ctx.func.__name__}': {e}")
 
