@@ -156,6 +156,15 @@ def vectorize(search_description: Optional[str] = None,
         except Exception as e:
             logger.error("Error in @vectorize setup for '%s': %s", func.__name__, e)
 
+        # Surface the wrapped function's module in `vectorwave info` so a
+        # debugger can see which modules are being observed (matches what
+        # VectorWaveAutoInjector does for monkey-patched modules).
+        try:
+            from ..runtime import register_instrumented_module
+            register_instrumented_module(module_name)
+        except Exception:
+            pass
+
         def resolve_semantic_filters(args, kwargs):
             runtime_filters = semantic_cache_filters.copy() if semantic_cache_filters else {}
 
