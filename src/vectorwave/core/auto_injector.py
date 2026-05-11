@@ -97,4 +97,15 @@ class VectorWaveAutoInjector:
                 patched_count += 1
 
         logger.info(f"✨ Injection Complete. {patched_count} functions registered & auto-wired.")
+
+        # Surface the patched module in `vectorwave info` so a debugger can
+        # tell at a glance which packages got monkey-patched (auto-inject's
+        # main usability complaint).
+        if patched_count > 0:
+            try:
+                from ..runtime import register_instrumented_module
+                register_instrumented_module(module.__name__)
+            except Exception:
+                pass
+
         return module

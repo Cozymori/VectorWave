@@ -1,3 +1,8 @@
+from . import runtime as _runtime
+# Light up the visible indicator (stderr banner + PID file) on first import.
+# Silence with VECTORWAVE_QUIET=1.
+_runtime.activate()
+
 from .core.decorator import vectorize
 from .database.db import initialize_database, update_database_schema
 from .database.db_search import search_functions, search_executions, search_errors_by_message, search_functions_hybrid
