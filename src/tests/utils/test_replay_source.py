@@ -32,10 +32,13 @@ def mock_replay_deps(monkeypatch):
     mock_client.collections.get.return_value = mock_collection
     mock_get_client = MagicMock(return_value=mock_client)
 
-    # --- [수정] Patch dependencies where they are USED, not just defined ---
+    # --- Patch dependencies where they are USED ---
 
-    # 1. Patch for Replayer (vectorwave/utils/replayer.py)
-    monkeypatch.setattr("vectorwave.utils.replayer.get_cached_client", mock_get_client)
+    # 1. Replayer now uses VectorStore — patch the factory instead of get_cached_client.
+    mock_store = MagicMock()
+    mock_store.query.return_value = []
+    mock_store.fetch_by_id.return_value = None
+    monkeypatch.setattr("vectorwave.utils.replayer.get_vector_store", MagicMock(return_value=mock_store))
     monkeypatch.setattr("vectorwave.utils.replayer.get_weaviate_settings", mock_get_settings)
 
     # 2. Patch for Database (vectorwave/database/db.py) - 안전장치
@@ -90,20 +93,27 @@ def test_execution_source_tagging(mock_replay_deps):
     # ---------------------------------------------------------
     print("\n🔄 2. Running Replay...")
 
-    # Prepare dummy log for Replayer to fetch
-    dummy_log_obj = MagicMock()
-    dummy_log_obj.uuid = "old-uuid-123"
-    dummy_log_obj.properties = {
-        "function_name": "calc_add",
-        "a": 10,
-        "b": 20,
-        "return_value": "30",
-        "exec_source": "REALTIME"
-    }
+    # Prepare a dummy StoreRecord for the replayer to fetch via VectorStore.
+    from vectorwave.store.base import StoreRecord
+    dummy_record = StoreRecord(
+        uuid="old-uuid-123",
+        properties={
+            "function_name": "calc_add",
+            "a": 10,
+            "b": 20,
+            "return_value": "30",
+            "exec_source": "REALTIME",
+        },
+    )
 
-    # Replayer uses client.collections.get().query.fetch_objects()
-    mock_collection = mock_replay_deps["client"].collections.get.return_value
-    mock_collection.query.fetch_objects.return_value.objects = [dummy_log_obj]
+    # Replayer now uses store.query for the standard executions path. Golden
+    # returns empty so the standard branch fills the batch with our record.
+    from vectorwave.utils import replayer as replayer_mod
+    store = replayer_mod.get_vector_store()
+    store.query.side_effect = [
+        [],            # golden lookup → empty
+        [dummy_record], # standard executions → one match
+    ]
 
     # Also need to mock import_module since Replayer imports the function dynamically
     with patch("vectorwave.utils.replayer.importlib.import_module") as mock_import:

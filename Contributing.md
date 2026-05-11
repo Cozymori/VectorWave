@@ -33,14 +33,32 @@ interface (`src/vectorwave/store/`). Two backends ship today:
 | `lite` | LanceDB local file store | `VECTORWAVE_MODE=lite` | hackathons, Colab, quick demos — no Docker |
 
 In Lite mode VectorWave writes to `.vectorwave/lance/` (override with
-`VECTORWAVE_LITE_PATH`) and works offline with `pip install vectorwave`
+`VECTORWAVE_LITE_PATH`) and works offline with `pip install vectorwave[lite]`
 plus a Python-side vectorizer (default: HuggingFace `all-MiniLM-L6-v2`).
 
-Lite mode currently supports the core `@vectorize` flow: function
-metadata, execution logs, basic filter/sort fetch via
-`find_executions`, and vector cache lookup. Hybrid search and Weaviate's
-modular vectorizers (`text2vec-openai` etc.) remain Pro-only — see
-issue #95 for the migration roadmap.
+What works in each mode:
+
+| Feature | Pro | Lite |
+|---|---|---|
+| `@vectorize` decorator, log to executions collection | ✅ | ✅ |
+| `find_executions` / `search_executions` (filter + sort) | ✅ | ✅ |
+| `search_functions` (Python-vectorizer-driven `near_vector`) | ✅ | ✅ |
+| `search_errors_by_message` (near_vector + filter) | ✅ | ✅ |
+| `search_similar_execution` (semantic cache lookup) | ✅ | ✅ |
+| `@vectorize(semantic_cache=True)` end-to-end | ✅ | ✅ |
+| `check_semantic_drift` (KNN-based) | ✅ | ✅ |
+| `get_token_usage_stats` | ✅ | ✅ |
+| `VectorWaveArchiver` (export + clear) | ✅ | ✅ |
+| `VectorWaveDatasetManager` (golden register + recommend) | ✅ | ✅ |
+| `VectorWaveReplayer` (golden-first replay) | ✅ | ✅ |
+| `VectorWaveHealer` (LLM-driven self-healing) | ✅ | ✅ |
+| `search_functions_hybrid` (BM25 + vector hybrid) | ✅ | ❌ Pro-only |
+| Weaviate vectorizer modules (`text2vec-openai` etc.) | ✅ | ❌ Pro-only |
+| Multi-tenancy, server-side replication | ✅ | ❌ Pro-only |
+
+Lite uses Python-side filtering (a fetch + Python filter), which is fine
+at hackathon / Colab scale (≲100k rows). For multi-million-row production
+workloads, use Pro mode (Weaviate ANN + indexed filters).
 
 ## OpenTelemetry export
 

@@ -10,10 +10,8 @@ import pprint
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
-import weaviate.classes.query as wvc_query
-
-from ..database.db import get_cached_client
 from ..models.db_config import get_weaviate_settings
+from ..store import get_vector_store
 import vectorwave.vectorwave_core as vectorwave_core
 from .context import execution_source_context
 from .serialization import deserialize_return_value
@@ -50,7 +48,7 @@ class VectorWaveReplayer:
     """
 
     def __init__(self):
-        self.client = get_cached_client()
+        self.store = get_vector_store()
         self.settings = get_weaviate_settings()
         self.collection_name = self.settings.EXECUTION_COLLECTION_NAME
         self.golden_collection_name = self.settings.GOLDEN_COLLECTION_NAME
@@ -194,36 +192,35 @@ class VectorWaveReplayer:
         """
         candidates = []
 
-        # 2-1. Fetch from Golden Dataset
-        golden_col = self.client.collections.get(self.golden_collection_name)
-        exec_col = self.client.collections.get(self.collection_name)
-
+        # 2-1. Fetch from Golden Dataset via the VectorStore.
         try:
-            golden_res = golden_col.query.fetch_objects(
-                filters=wvc_query.Filter.by_property("function_name").equal(func_short_name),
-                limit=limit
+            golden_records = self.store.query(
+                collection=self.golden_collection_name,
+                filters={"function_name": func_short_name},
+                limit=limit,
             )
 
-            for obj in golden_res.objects:
-                original_uuid = obj.properties.get("original_uuid")
+            for rec in golden_records:
+                original_uuid = rec.properties.get("original_uuid")
                 if not original_uuid:
                     continue
 
-                original_log = exec_col.query.fetch_object_by_id(original_uuid)
+                original_log = self.store.fetch_by_id(
+                    collection=self.collection_name, uuid=original_uuid
+                )
                 if original_log is None:
-                    logger.warning(f"Golden Data {obj.uuid} refers to missing log {original_uuid}. Skipping.")
+                    logger.warning(f"Golden Data {rec.uuid} refers to missing log {original_uuid}. Skipping.")
                     continue
 
                 candidates.append({
-                    "uuid": str(obj.uuid),
+                    "uuid": rec.uuid,
                     "inputs": original_log.properties,
-                    "expected_output": self._deserialize_value(obj.properties.get("return_value")),
-                    "is_golden": True
+                    "expected_output": self._deserialize_value(rec.properties.get("return_value")),
+                    "is_golden": True,
                 })
 
             if candidates:
                 logger.info(f"Loaded {len(candidates)} Golden Data test cases.")
-
         except Exception as e:
             logger.error(f"Failed to fetch Golden Data: {e}")
 
@@ -231,22 +228,19 @@ class VectorWaveReplayer:
         remaining = limit - len(candidates)
         if remaining > 0:
             try:
-                filters = (
-                        wvc_query.Filter.by_property("function_name").equal(func_short_name) &
-                        wvc_query.Filter.by_property("status").equal("SUCCESS")
-                )
-                exec_res = exec_col.query.fetch_objects(
-                    filters=filters,
+                exec_records = self.store.query(
+                    collection=self.collection_name,
+                    filters={"function_name": func_short_name, "status": "SUCCESS"},
+                    sort_by="timestamp_utc",
+                    sort_ascending=False,
                     limit=remaining,
-                    sort=wvc_query.Sort.by_property("timestamp_utc", ascending=False)
                 )
-
-                for obj in exec_res.objects:
+                for rec in exec_records:
                     candidates.append({
-                        "uuid": str(obj.uuid),
-                        "inputs": obj.properties,
-                        "expected_output": self._deserialize_value(obj.properties.get("return_value")),
-                        "is_golden": False
+                        "uuid": rec.uuid,
+                        "inputs": rec.properties,
+                        "expected_output": self._deserialize_value(rec.properties.get("return_value")),
+                        "is_golden": False,
                     })
             except Exception as e:
                 logger.error(f"Failed to fetch Standard Executions: {e}")
@@ -280,7 +274,6 @@ class VectorWaveReplayer:
 
     def _update_baseline_value(self, uuid_str: str, new_value: Any, is_golden: bool):
         collection_name = self.golden_collection_name if is_golden else self.collection_name
-        collection = self.client.collections.get(collection_name)
 
         processed_val = vectorwave_core.mask_and_serialize(new_value, [])
         try:
@@ -289,9 +282,10 @@ class VectorWaveReplayer:
             val_str = str(processed_val)
 
         try:
-            collection.data.update(
+            self.store.update(
+                collection=collection_name,
                 uuid=uuid_str,
-                properties={"return_value": str(val_str)}
+                properties={"return_value": str(val_str)},
             )
         except Exception as e:
             logger.error(f"Failed to update baseline for {uuid_str}: {e}")
