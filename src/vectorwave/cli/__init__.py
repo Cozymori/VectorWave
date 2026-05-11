@@ -258,7 +258,49 @@ def _build_parser() -> argparse.ArgumentParser:
 
     dev_sub.add_parser("seed", help="Insert a small demo dataset of functions + execution logs").set_defaults(func=cmd_seed)
 
+    subparsers.add_parser(
+        "info",
+        help="List Python processes currently running with VectorWave imported",
+    ).set_defaults(func=cmd_info)
+
     return parser
+
+
+def cmd_info(_args: argparse.Namespace) -> int:
+    """Print a table of every live process that has VectorWave active.
+
+    Reads PID files written by ``vectorwave.runtime.activate`` and prunes
+    stale entries (PIDs that aren't alive any more).
+    """
+    from vectorwave.runtime import list_active_processes
+
+    # Exclude the CLI's own PID — it's only "active" because importing
+    # vectorwave to run this command activated the indicator.
+    procs = [p for p in list_active_processes() if p.pid != os.getpid()]
+    if not procs:
+        print("[vectorwave info] no active VectorWave processes found.")
+        return 0
+
+    now = time.time()
+    rows = []
+    header = ("PID", "MODE", "OTEL", "RUST", "AGE", "MODULES")
+    for p in procs:
+        age = int(now - (p.started_at or now))
+        age_str = f"{age // 3600}h{(age % 3600) // 60}m" if age >= 3600 else f"{age // 60}m{age % 60}s"
+        otel = f"on:{p.otel_service_name}" if p.otel_enabled else "off"
+        rust = "yes" if p.rust_core else "py"
+        mods = ",".join(p.instrumented_modules) or "(decorator)"
+        if len(mods) > 50:
+            mods = mods[:47] + "..."
+        rows.append((str(p.pid), p.mode, otel, rust, age_str, mods))
+
+    widths = [max(len(r[i]) for r in (rows + [header])) for i in range(len(header))]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*header))
+    print(fmt.format(*("-" * w for w in widths)))
+    for row in rows:
+        print(fmt.format(*row))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

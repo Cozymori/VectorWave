@@ -60,6 +60,35 @@ Lite uses Python-side filtering (a fetch + Python filter), which is fine
 at hackathon / Colab scale (≲100k rows). For multi-million-row production
 workloads, use Pro mode (Weaviate ANN + indexed filters).
 
+## Knowing VectorWave is active
+
+`import vectorwave` prints a one-line banner to stderr and drops a small JSON
+file at `~/.vectorwave/run/{pid}.json`. The banner shows mode, OTel state,
+and Rust-core availability; the JSON file lets `vectorwave info` (and any
+other tooling) list every process currently observed.
+
+```bash
+# In your app
+import vectorwave  # → stderr: [vectorwave] active — mode=lite, otel=my-svc, rust-core (pid=12345)
+
+# From another shell
+vectorwave info
+# PID    MODE  OTEL       RUST  AGE    MODULES
+# -----  ----  ---------  ----  -----  ----------
+# 12345  lite  on:my-svc  yes   2m13s  demo.api,demo.workers
+```
+
+- Silence the banner with `VECTORWAVE_QUIET=1` (CI / library-import contexts
+  where stderr is sacred).
+- Override the PID-file directory with `VECTORWAVE_RUN_DIR=/some/other/path`.
+- PID files are removed at interpreter shutdown via `atexit`, and stale
+  entries (dead PIDs) are pruned on every `vectorwave info` run.
+
+When `VectorWaveAutoInjector.inject("foo")` runs, the module name shows up
+in the `MODULES` column — useful for debugging "wait, where did this
+logging come from?" since auto-injection is otherwise invisible in the
+source.
+
 ## OpenTelemetry export
 
 VectorWave can mirror every span to an OpenTelemetry exporter so traces show
