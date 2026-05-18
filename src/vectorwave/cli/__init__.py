@@ -263,6 +263,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="List Python processes currently running with VectorWave imported",
     ).set_defaults(func=cmd_info)
 
+    from vectorwave.check.cli import add_check_subparser
+    add_check_subparser(subparsers)
+
     return parser
 
 
