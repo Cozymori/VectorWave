@@ -32,7 +32,8 @@ dependencies = [
     "requests",
     "openai",
     "PyGithub",
-    "schedule"
+    "schedule",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -60,6 +61,9 @@ otel = [
 
 [project.scripts]
 vectorwave = "vectorwave.cli:main"
+
+[project.entry-points.pytest11]
+vectorwave_check = "vectorwave.check.plugin"
 
 [project.urls]
 Repository = "https://github.com/cozymori/vectorwave"
