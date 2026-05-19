@@ -16,10 +16,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 🐧 Linux (x86_64)
+          # 🐧 Linux (x86_64) — --find-interpreter so maturin discovers any
+          # Python inside the manylinux container (the default `python3` path
+          # is not always present in newer manylinux_2_28 images).
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            args: --release --out dist
+            args: --release --out dist --find-interpreter
           # 🪟 Windows (x86_64)
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -41,7 +43,10 @@ jobs:
           target: ${{ matrix.target }}
           args: ${{ matrix.args }}
           sccache: 'true'
-          manylinux: auto
+          # Pin manylinux explicitly (ignored on non-Linux targets). 2_28 is
+          # the modern manylinux image that ships multiple Python versions
+          # under /opt/python/, which maturin --find-interpreter can pick up.
+          manylinux: 2_28
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
