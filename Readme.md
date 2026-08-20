@@ -4,19 +4,14 @@
 Need more information? Visit [here](https://www.cozymori.net/vectorwave)
 
 # VectorWave
-![Star](https://badgen.net/github/stars/cozymori/vectorwave)
-![Release](https://badgen.net/github/release/cozymori/vectorwave)
-![Tag](https://badgen.net/github/tag/cozymori/vectorwave)
-![Commit](https://badgen.net/github/last-commit/cozymori/vectorwave)
-![Contributors](https://badgen.net/github/contributors/cozymori/vectorwave)
-![OpenPrs](https://badgen.net/github/open-prs/cozymori/vectorwave)
-![MergedPrs](https://badgen.net/github/merged-prs/cozymori/vectorwave)
-![Checks](https://badgen.net/github/checks/cozymori/vectorwave)
-![Pypi](https://badgen.net/pypi/v/vectorwave)
+![PyPI](https://badgen.net/pypi/v/vectorwave)
+![Python](https://badgen.net/pypi/python/vectorwave)
+![License](https://badgen.net/pypi/license/vectorwave)
+![CI](https://badgen.net/github/checks/cozymori/vectorwave)
 
-**Make your LLM functions cacheable, testable, and self-healing.**
+**Semantic caching and golden-data regression testing for your LLM functions — from one decorator.**
 
-VectorWave is one decorator that turns any Python function into a vectorized, observable, and replayable unit — and a pytest plugin that turns its golden execution history into a regression test.
+`@vectorize` captures every call your function makes — inputs, outputs, vectors, timing. That single execution history powers two things teams usually build and wire up separately: a **semantic cache** that skips re-running work you've already done, and a **pytest regression oracle** that catches the drift `assert a == b` can't. Drift detection and an experimental auto-diagnosis step fall out of the same history — but caching and testing are the core.
 
 ```bash
 pip install vectorwave             # Pro mode (Weaviate)
@@ -40,13 +35,12 @@ pip install "vectorwave[otel]"     # + OpenTelemetry mirror
 
 ## 🚀 What is VectorWave?
 
-VectorWave solves three problems that LLM-backed Python code keeps running into:
+VectorWave solves two problems that LLM-backed Python code keeps running into — with **one mechanism**:
 
 1. **The same prompt is processed twice.** Direct LLM calls are expensive; the same semantic input usually has the same useful output. → **Semantic caching** with cosine-similarity lookup.
-2. **You can't `assert a == b` on an LLM.** Output drifts a little every run. A regression that drops a clause looks identical to a regression that swaps a word. → **Pytest plugin** that compares to golden data by similarity, exact match, or LLM judge.
-3. **Production errors live in your dashboards, not in your code.** Errors get logged and forgotten. → **Self-healing pipeline** that diagnoses the error from execution history and opens a GitHub PR with a patch.
+2. **You can't `assert a == b` on an LLM.** Output drifts a little every run. A regression that drops a clause looks identical to one that swaps a word. → **Pytest plugin** that compares to golden data by similarity, exact match, or LLM judge.
 
-One decorator (`@vectorize`) gives you all three. Add the pytest marker for free regression tests, the `vectorwave check calibrate` CLI for a sensible threshold, and the OpenTelemetry mirror to plug into your existing observability stack.
+Both come from the same source: `@vectorize` records every call, and that **golden execution history** is reused as the cache *and* as the test oracle. Two more capabilities fall out of the same history — **semantic drift detection** and an **experimental automatic error diagnosis** step (opt-in; see below) — but caching and testing are the load-bearing core.
 
 ---
 
@@ -72,7 +66,7 @@ For Lite mode, no setup beyond `pip install`:
 export VECTORWAVE_MODE=lite
 ```
 
-### 2. Three demos in one decorator
+### 2. Two demos in one decorator
 
 #### A. Semantic caching
 
@@ -80,18 +74,18 @@ export VECTORWAVE_MODE=lite
 import time
 from vectorwave import vectorize, initialize_database
 
-initialize_database()
+initialize_database()   # Pro mode only; in Lite mode (VECTORWAVE_MODE=lite) skip this
 
-@vectorize(semantic_cache=True, cache_threshold=0.95, auto=True)
+@vectorize(semantic_cache=True, cache_threshold=0.95, capture_return_value=True)
 def expensive_llm_task(query: str):
     time.sleep(2)
     return f"Processed result for: {query}"
 
-# First call: cache miss → 2.0s
+# First call: cache miss → ~2.0s
 print(expensive_llm_task("How do I fix a Python bug?"))
 
-# Second call (semantically similar): cache hit → ~20 ms
-print(expensive_llm_task("Tell me how to debug Python code."))
+# Second call — different words, same meaning: cache hit → ~0.02s
+print(expensive_llm_task("What's the best way to fix a bug in Python?"))
 ```
 
 #### B. Pytest regression test
@@ -121,19 +115,7 @@ vectorwave check calibrate myapp.expensive_llm_task
 # Use --rerun to measure the honest noise floor by re-executing the function.
 ```
 
-#### C. Self-healing
-
-```python
-@vectorize(auto=True)
-def risky_calculation(a, b):
-    return a / b
-
-risky_calculation(10, 0)   # ZeroDivisionError
-```
-
-VectorWave's `AutoHealerBot` detects the error, retrieves source + stack trace, generates a patch via LLM, and opens a Pull Request in your GitHub repo. No babysitting required.
-
-![VectorWave Healer Architecture](./docs_kr/images/self_healing.png)
+> **Experimental — Automatic error diagnosis:** VectorWave can also read a function's runtime errors from its execution history and open a GitHub PR with a suggested patch (opt-in, Pro-only, needs an LLM + GitHub token). It's deliberately not a headline guarantee — see **Automatic Error Diagnosis & Patch PRs** under Key Features below.
 
 ---
 
@@ -169,14 +151,6 @@ vectorwave check calibrate myapp.summarize --rerun  # honest: noise floor
 
 Outputs a percentile distribution + a ready-to-paste `[tool.vectorwave.check."<target>"]` snippet. Recommends `strategy="exact"` for deterministic targets and `strategy="llm"` for highly variable ones.
 
-### 🩺 Self-Healing & GitOps
-
-VectorWave doesn't just log errors — it patches them.
-
-- **Automated Root Cause Analysis** using RAG over your execution history.
-- **GitOps Integration**: opens a Pull Request with the fix.
-- **Cooldown Mechanism**: prevents PR spam for the same error.
-
 ### 💾 Lite Mode — *new in 1.0*
 
 Embedded LanceDB backend. No Docker, no ports, single on-disk directory.
@@ -208,6 +182,18 @@ Detect when your users start asking things your model wasn't trained for.
 
 ![VectorWave Drift Architecture](./docs_kr/images/semantic_drift.png)
 
+### 🧪 Automatic Error Diagnosis & Patch PRs — *experimental*
+
+Opt-in and Pro-only. When a `@vectorize`d function raises, VectorWave can read the error from its execution history, ask an LLM for a fix, and open a **GitHub Pull Request** with the suggested patch — for you to review, never auto-merged.
+
+- **RAG over your execution history** for root-cause context.
+- **You stay in the loop**: it opens a PR, you approve. A cooldown prevents PR spam for the same error.
+- **Requirements**: `OPENAI_API_KEY`, `GITHUB_TOKEN` + `GITHUB_REPO_NAME`, and Pro mode (Weaviate).
+
+This is the most experimental part of VectorWave and is intentionally *not* one of its headline guarantees. Rationale and internals in [healer.py](./src/vectorwave/utils/healer.py).
+
+![VectorWave Healer Architecture](./docs_kr/images/self_healing.png)
+
 ---
 
 ## 🏗 Architecture
@@ -221,7 +207,7 @@ VectorWave sits as a transparent layer between your application and the LLM / in
 - **Optimization Engine**: intercepts function calls, checks semantic cache, returns a hit if one exists within threshold.
 - **Trace Context Manager**: collects execution logs, inputs, outputs, vectors — without modifying your code structure.
 - **VectorStore Layer**: backend-neutral storage protocol. New backends are a single-file addition.
-- **Self-Healing Pipeline**: an autonomous agent that wakes on errors, diagnoses, and submits patches.
+- **Auto-Diagnosis Pipeline** *(experimental)*: on errors, diagnoses from history and opens a patch PR for review.
 - **Check Plugin** (`vectorwave.check`): pytest entry-point + calibration CLI.
 
 ---
@@ -234,7 +220,6 @@ VectorWave sits as a transparent layer between your application and the LLM / in
 |---|---|---|---|
 | **Latency (cache hit)** | ~2.5 s (LLM API) | **~0.02 s** | **125× faster** |
 | **Cost (cache hit)** | $0.03 / call | **$0.00** | **100% savings** |
-| **Reliability** | manual fix | **auto PR** | autonomous |
 
 ### Wrapper overhead (`@vectorize` on a bare Python function)
 
@@ -249,6 +234,28 @@ Median time per call, measured via `pytest src/tests/benchmarks/ --benchmark-onl
 
 For any function doing >1 ms of real work, the wrapper tax is in the noise. The 33.8 ns baseline is an empty function — the "× vs bare" numbers look dramatic until you remember that.
 
+### Embeddings: how many, and how to keep them cheap
+
+VectorWave embeds **input text**, and does so sparingly — one small vector per stored call:
+
+| Per `@vectorize` call | Embeddings |
+|---|---|
+| cache hit (`semantic_cache=True`) | **1** — the lookup vector is reused for the hit log |
+| cache miss (`semantic_cache=True`) | **2** — one to look up, one to store the new execution |
+| logging only (no `semantic_cache`) | **1** — the stored execution vector |
+| a call that errors | **1** — the error message (used for error search) |
+
+Function **registration** embeds a one-line description once per function and caches it (`.vectorwave_functions_cache.json`) — it does *not* re-embed on every call. Drift detection reuses the stored vector, so it adds **zero** extra embeddings.
+
+**Keeping it cheap:**
+
+- `VECTORIZER=huggingface` (default) — embeddings run locally on CPU with `all-MiniLM-L6-v2` (384-dim). No API calls, no per-call cost, nothing leaves the process.
+- `VECTORIZER=weaviate_module` — Weaviate embeds server-side (one round trip, no Python-side model).
+- `VECTORIZER=openai_client` — each embedding is an OpenAI API call (highest quality, but real cost + latency per call). Reserve it for when you need it.
+- `VECTORIZER=none` — no embeddings at all (disables semantic caching and drift).
+
+Only calibration batches embeddings (`embed_batch`); the per-call path embeds one text at a time, and the batch manager batches **DB writes**, not embeddings.
+
 ---
 
 ## 🆚 How does VectorWave compare?
@@ -259,7 +266,7 @@ For any function doing >1 ms of real work, the wrapper tax is in the noise. The 
 | Golden-data regression testing | X | O | **O** |
 | Pytest integration | X | △ | **O (marker + fixture)** |
 | Threshold calibration (CLI) | X | △ | **O (percentile-backed)** |
-| Self-healing (auto-PR) | X | X | **O** |
+| Auto error diagnosis & patch PR *(experimental)* | X | X | **O** |
 | OpenTelemetry mirror | X | X | **O** |
 | Drift detection | X | △ | **O** |
 | Zero-config local mode | △ | △ | **O (Lite mode)** |
@@ -278,7 +285,21 @@ Unlike traditional Key-Value caching (e.g., Redis), VectorWave understands **Con
    - Neighbor within `threshold` → **return cached result**.
    - Otherwise → **execute function** → **async-log to DB** (the new entry becomes future golden data).
 
-Golden executions feed the regression test layer. Errors feed the self-healing layer. Drift over time feeds the radar. Same substrate, four use cases.
+Golden executions feed the regression-test layer. Drift over time feeds the radar. Errors feed the experimental auto-diagnosis step. **Same substrate — caching and testing at the core, the rest derived.**
+
+---
+
+## 🔒 Data Handling
+
+VectorWave stores what your functions do, so it's worth knowing exactly what lands where:
+
+- **What's captured**: per call, the function's inputs (with `capture_inputs`/`replay`), return value (with `capture_return_value`), a vector embedding of the input text, and timing/status metadata. The function's **source code** is also stored (used by regression replay and the experimental auto-diagnosis).
+- **Redaction**: before anything is stored, values whose keys match `sensitive_keys` are replaced with `[MASKED]` (defaults: `password`, `api_key`, `token`, `secret`, `auth_token`). Add your own PII/secret keys via settings — masking runs in the `mask_and_serialize` path on the way in.
+- **Where it lives**: **Lite mode** keeps everything in a local on-disk directory (`.vectorwave/`) — nothing leaves your machine. **Pro mode** writes to the Weaviate instance *you* run.
+- **Embeddings & third parties**: with `VECTORIZER=huggingface`, embeddings are computed **locally**; with `openai_client` or Weaviate's `text2vec-openai`, the input text is sent to OpenAI to be embedded. The experimental auto-diagnosis also sends source + error context to an LLM.
+- **Retention**: 1.0 has no automatic TTL — you own the store's lifecycle. Drop collections to delete history; back up the Weaviate volume (Pro) or the `.vectorwave/` directory (Lite) as you would any datastore.
+
+Treat the execution store like application logs that may contain user data: scope `sensitive_keys` to your fields, and prefer Lite mode with local embeddings when inputs are sensitive.
 
 ---
 
@@ -290,4 +311,4 @@ Golden executions feed the regression test layer. Errors feed the self-healing l
 
 ## 😍 Contributing
 
-We are extremely open to contributions — new vectorizers, better healing prompts, additional backends, doc improvements, typo fixes. Please read the [Contributing guide](./Contributing.md) before opening a PR.
+We are extremely open to contributions — new vectorizers, better diagnosis prompts, additional backends, doc improvements, typo fixes. Please read the [Contributing guide](./Contributing.md) before opening a PR.
