@@ -1,6 +1,4 @@
 
-![VectorWave Logo](./docs/assets/vectorwave.png)
-
 Need more information? Visit [here](https://www.cozymori.net/vectorwave)
 
 # VectorWave
