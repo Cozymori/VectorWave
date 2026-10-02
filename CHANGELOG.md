@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-02
+
+### Fixed
+
+- **Semantic cache never hit.** `@vectorize` injects `function_uuid`,
+  `exec_source` and `trace_id` into call kwargs, and the logging path
+  embedded those keys into the stored execution vector while the
+  cache-lookup path embedded only the caller's arguments. The two
+  vectors never aligned (identical inputs capped near cosine 0.76), so
+  no lookup could pass the default 0.95 threshold. Affected both Pro and
+  Lite mode. The reserved keys are now stripped before vectorizing, with
+  a regression test in `src/tests/monitoring/test_tracer.py`.
+
 ## [1.0.0] - 2026-05-20
 
 The 1.0 release shifts VectorWave from a Weaviate-coupled framework into
