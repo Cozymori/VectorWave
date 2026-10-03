@@ -306,7 +306,17 @@ def cmd_info(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _ensure_cwd_on_path() -> None:
+    # The `vectorwave` console script puts its own bin dir on sys.path, not
+    # the cwd (unlike `python -m vectorwave.cli`). Targets such as
+    # `check calibrate myapp.fn --rerun` are user modules in the cwd.
+    cwd = os.getcwd()
+    if "" not in sys.path and cwd not in sys.path:
+        sys.path.insert(0, cwd)
+
+
 def main(argv: list[str] | None = None) -> int:
+    _ensure_cwd_on_path()
     parser = _build_parser()
     args = parser.parse_args(argv)
     return args.func(args) or 0
