@@ -98,13 +98,13 @@ def vectorize(search_description: Optional[str] = None,
 
             try:
                 abs_file_path = os.path.abspath(inspect.getsourcefile(func))
-                repo_root, relative_file_path = get_repo_root_and_relative_path(abs_file_path)
-                if relative_file_path:
-                    file_path = relative_file_path
+                repo_info = get_repo_root_and_relative_path(abs_file_path)
+                if repo_info:
+                    file_path = repo_info[1]
                 else:
                     file_path = abs_file_path
-                    logger.warning(f"Function '{function_name}' is not in a Git repository. "
-                                   f"PR creation might fail for absolute path: {file_path}")
+                    logger.debug(f"Function '{function_name}' is not in a Git repository. "
+                                 f"PR creation might fail for absolute path: {file_path}")
             except Exception as e:
                 file_path = ""
                 logger.error(f"Failed to determine file path for '{function_name}': {e}")
