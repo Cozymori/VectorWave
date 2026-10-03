@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-10-03
+
 ### Fixed
 
 - **`vectorwave` CLI could not import modules from the current
@@ -14,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sys.path`, not the cwd, so `vectorwave check calibrate myapp.fn
   --rerun` failed with `ModuleNotFoundError` unless `PYTHONPATH=.` was
   set. `main()` now adds the cwd, the same way `python -m` does.
+- **`@vectorize` logged an error for every function outside a git
+  repository.** The repo lookup returns `None` there, and unpacking it
+  raised, so `file_path` was stored empty and
+  `Failed to determine file path` was logged at import time. It now
+  falls back to the absolute path (debug log only).
+- **Wheels for Python 3.10–3.14 on every platform.** 1.0.1 shipped
+  Windows wheels for 3.12 only and macOS wheels for 3.14 only, so other
+  versions built from the sdist and needed a Rust toolchain.
 
 ## [1.0.1] - 2026-10-02
 
