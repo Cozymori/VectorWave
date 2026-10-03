@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`vectorwave` CLI could not import modules from the current
+  directory.** The console script puts its own bin directory on
+  `sys.path`, not the cwd, so `vectorwave check calibrate myapp.fn
+  --rerun` failed with `ModuleNotFoundError` unless `PYTHONPATH=.` was
+  set. `main()` now adds the cwd, the same way `python -m` does.
+
 ## [1.0.1] - 2026-10-02
 
 ### Fixed
