@@ -27,7 +27,7 @@ class VectorWaveHealer:
     Self-Healing agent that analyzes functions with errors and suggests
     corrected code based on past successful executions.
     """
-    def __init__(self, model: str = "gpt-4-turbo"):
+    def __init__(self, model: str = "gpt-4o"):
         self.settings = get_weaviate_settings()
         self.model = model
         self.client = get_llm_client()
