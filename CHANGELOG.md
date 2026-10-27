@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database is unreachable, the final flush fails quickly and exit is not
   blocked.
 
+## [1.0.3] - 2026-10-27
+
+### Fixed
+
+- **Self-healing returned no fix.** `VectorWaveHealer()` and the other
+  LLM helpers defaulted to `gpt-4-turbo`, which OpenAI has deprecated
+  (`404 model_not_found`), so `diagnose_and_heal()` printed
+  `LLM returned no response.` The default is now `gpt-4o`. Passing
+  `model=` still overrides it.
+
 ## [1.0.2] - 2026-10-03
 
 ### Fixed
