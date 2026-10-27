@@ -17,14 +17,14 @@ def _get_openai_client():
     return get_llm_client()
 
 
-def search_and_answer(query: str, model: str = "gpt-4-turbo", language: str = "en") -> str:
+def search_and_answer(query: str, model: str = "gpt-4o", language: str = "en") -> str:
     """
     [Code RAG] Retrieves a function and generates an answer based on its content.
     This is a high-level wrapper around existing search_functions().
 
     Args:
         query: The user's natural language question.
-        model: The LLM model to use (default: gpt-4-turbo).
+        model: The LLM model to use (default: gpt-4o).
         language: The language for the answer ('en' for English, 'ko' for Korean).
     """
     # 1. Retrieve (Use existing DB search)
@@ -90,7 +90,7 @@ def search_and_answer(query: str, model: str = "gpt-4-turbo", language: str = "e
         return error_msg if language == 'en' else f"❌ 답변 생성 중 오류 발생: {e}"
 
 
-def analyze_trace_log(trace_id: str, model: str = "gpt-4-turbo", language: str = "en") -> str:
+def analyze_trace_log(trace_id: str, model: str = "gpt-4o", language: str = "en") -> str:
     """
     [Trace RAG] Retrieves all logs for a specific Trace ID and analyzes the cause.
 

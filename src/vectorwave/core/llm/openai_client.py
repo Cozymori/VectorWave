@@ -58,7 +58,7 @@ class VectorWaveOpenAIClient(BaseLLMClient):
             logger.error(f"Embedding error: {e}")
             return None
 
-    def create_chat_completion(self, messages: List[Dict], model: str = "gpt-4-turbo", temperature: float = 0.1,
+    def create_chat_completion(self, messages: List[Dict], model: str = "gpt-4o", temperature: float = 0.1,
                                response_format=None, category: str = "default") -> Optional[str]:
         """
         Returns: Content string only (Tokens are logged internally)

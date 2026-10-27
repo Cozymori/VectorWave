@@ -114,7 +114,7 @@ class SemanticReplayer(VectorWaveReplayer):
         try:
             # Refactored to use create_chat_completion
             response_text = self.openai_client.create_chat_completion(
-                model="gpt-4-turbo",
+                model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
                 temperature=0.0,
