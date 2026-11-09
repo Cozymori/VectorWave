@@ -187,3 +187,73 @@ def test_flush_batch_reconnects_after_disconnect(batch_e2e_env):
         assert "reconnect" in names
     finally:
         client.close()
+
+
+# ---------------------------------------------------------------------------
+# Shutdown must write queued items, not drop them
+# ---------------------------------------------------------------------------
+
+def _queue_then_shutdown(count: int, collection: str):
+    manager = get_batch_manager()
+    for i in range(count):
+        manager.add_object(collection, {**_make_log_props(f"fn_{i}")})
+    manager.shutdown()
+
+
+def test_shutdown_flushes_queued_items_in_lite_mode(monkeypatch, tmp_path):
+    """Items below the batch threshold and inside the flush interval are only
+    written by the shutdown flush. The Rust worker used to drop them on exit."""
+    monkeypatch.setenv("VECTORWAVE_MODE", "lite")
+    monkeypatch.setenv("VECTORWAVE_LITE_PATH", str(tmp_path / "lance"))
+    monkeypatch.setenv("VECTORIZER", "none")
+    monkeypatch.setenv("BATCH_THRESHOLD", "100")
+    monkeypatch.setenv("FLUSH_INTERVAL_SECONDS", "60")
+    monkeypatch.setenv("WEAVIATE_HOST", "lite-mode.invalid")
+    from vectorwave.store.factory import get_vector_store
+    _clear_all_caches()
+    get_vector_store.cache_clear()
+    try:
+        store = get_vector_store()
+        store.ensure_collection("VectorWaveExecutions", properties=[])
+
+        _queue_then_shutdown(7, "VectorWaveExecutions")
+
+        assert len(store.query("VectorWaveExecutions", limit=100)) == 7
+    finally:
+        _clear_all_caches()
+        get_vector_store.cache_clear()
+
+
+@pytest.mark.e2e
+def test_shutdown_flushes_queued_items_to_weaviate(batch_e2e_env, monkeypatch):
+    monkeypatch.setenv("BATCH_THRESHOLD", "100")
+    monkeypatch.setenv("FLUSH_INTERVAL_SECONDS", "60")
+    _clear_all_caches()
+    settings = batch_e2e_env
+
+    _queue_then_shutdown(7, settings.EXECUTION_COLLECTION_NAME)
+
+    client = get_weaviate_client(settings)
+    try:
+        coll = client.collections.get(settings.EXECUTION_COLLECTION_NAME)
+        assert len(coll.query.fetch_objects(limit=100).objects) == 7
+    finally:
+        client.close()
+
+
+def test_shutdown_returns_quickly_when_weaviate_is_unreachable(monkeypatch):
+    """The shutdown flush must not hang process exit when the DB is gone."""
+    import time
+    monkeypatch.setenv("VECTORWAVE_MODE", "pro")
+    monkeypatch.setenv("WEAVIATE_HOST", "127.0.0.1")
+    monkeypatch.setenv("WEAVIATE_PORT", "1")
+    monkeypatch.setenv("WEAVIATE_GRPC_PORT", "2")
+    monkeypatch.setenv("BATCH_THRESHOLD", "100")
+    monkeypatch.setenv("FLUSH_INTERVAL_SECONDS", "60")
+    _clear_all_caches()
+    try:
+        start = time.time()
+        _queue_then_shutdown(5, "VectorWaveExecutions")
+        assert time.time() - start < 15
+    finally:
+        _clear_all_caches()
