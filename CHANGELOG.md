@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Execution logs were lost when the process exited.** The Rust batch
+  worker ignored items that were still buffered or queued when it
+  received the shutdown signal. These were the calls from up to the last
+  `FLUSH_INTERVAL_SECONDS`, at most `BATCH_THRESHOLD` items. It now writes
+  them before it exits, as the Python fallback already did. If the
+  database is unreachable, the final flush fails quickly and exit is not
+  blocked.
+
 ## [1.0.2] - 2026-10-03
 
 ### Fixed
