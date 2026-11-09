@@ -73,7 +73,7 @@ impl RustBatchManager {
 
             loop {
                 crossbeam_channel::select! {
-                    recv(stop_rx) -> msg => {
+                    recv(stop_rx) -> _msg => {
                         break;
                     }
                     recv(rx) -> msg => {
@@ -85,17 +85,25 @@ impl RustBatchManager {
                     default(Duration::from_millis(100)) => {}
                 }
 
-
-                if stop_rx.is_empty() && (buffer.len() >= threshold || (last_flush.elapsed() >= flush_interval && !buffer.is_empty())) {
-
-                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        Self::flush_buffer(&buffer, &callback);
-                    }));
+                if buffer.len() >= threshold || (last_flush.elapsed() >= flush_interval && !buffer.is_empty()) {
+                    Self::flush_safely(&buffer, &callback);
                     buffer.clear();
                     last_flush = Instant::now();
                 }
             }
+
+            // Shutdown: write what is still buffered or queued instead of dropping it.
+            buffer.extend(rx.try_iter());
+            if !buffer.is_empty() {
+                Self::flush_safely(&buffer, &callback);
+            }
         }
+
+    fn flush_safely(buffer: &Vec<LogItem>, callback: &PyObject) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::flush_buffer(buffer, callback);
+        }));
+    }
 
     fn flush_buffer(buffer: &Vec<LogItem>, callback: &PyObject) {
         Python::with_gil(|py| {
