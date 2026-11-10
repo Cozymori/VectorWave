@@ -135,7 +135,48 @@ impl RustBatchManager {
     }
 }
 
-fn process_recursive(py: Python, value: &Bound<'_, PyAny>, sensitive_set: &HashSet<String>) -> PyResult<PyObject> {
+// Nesting deeper than this is replaced with a marker instead of recursing further.
+// Without a limit, deep or self-referencing data overflowed the stack and crashed the process.
+const MAX_DEPTH: usize = 64;
+
+fn process_recursive(
+    py: Python,
+    value: &Bound<'_, PyAny>,
+    sensitive_set: &HashSet<String>,
+    depth: usize,
+    ancestors: &mut HashSet<usize>,
+) -> PyResult<PyObject> {
+    let is_container = value.downcast::<PyDict>().is_ok() || value.downcast::<PyList>().is_ok();
+    if is_container {
+        if depth >= MAX_DEPTH {
+            return Ok(PyString::new(py, "[MAX_DEPTH]").into());
+        }
+        // Only the current path counts: a list shared by two keys is fine, a list inside itself is not.
+        let id = value.as_ptr() as usize;
+        if !ancestors.insert(id) {
+            return Ok(PyString::new(py, "[CIRCULAR]").into());
+        }
+        let result = process_container(py, value, sensitive_set, depth, ancestors);
+        ancestors.remove(&id);
+        return result;
+    }
+    if value.is_none() || value.is_instance_of::<PyBool>() || value.is_instance_of::<PyFloat>() || value.is_instance_of::<PyInt>() || value.is_instance_of::<PyString>() {
+        Ok(value.clone().unbind())
+    } else {
+        match value.str() {
+            Ok(s) => Ok(s.into()),
+            Err(_) => Ok(PyString::new(py, "[SERIALIZATION_ERROR]").into())
+        }
+    }
+}
+
+fn process_container(
+    py: Python,
+    value: &Bound<'_, PyAny>,
+    sensitive_set: &HashSet<String>,
+    depth: usize,
+    ancestors: &mut HashSet<usize>,
+) -> PyResult<PyObject> {
     if let Ok(dict_obj) = value.downcast::<PyDict>() {
         let new_dict = PyDict::new(py);
         for (k, v) in dict_obj {
@@ -143,32 +184,25 @@ fn process_recursive(py: Python, value: &Bound<'_, PyAny>, sensitive_set: &HashS
             if sensitive_set.contains(&k_str) {
                 new_dict.set_item(k, "[MASKED]")?;
             } else {
-                new_dict.set_item(k, process_recursive(py, &v, sensitive_set)?)?;
+                new_dict.set_item(k, process_recursive(py, &v, sensitive_set, depth + 1, ancestors)?)?;
             }
         }
         Ok(new_dict.into())
-    } else if let Ok(list_obj) = value.downcast::<PyList>() {
+    } else {
+        let list_obj = value.downcast::<PyList>()?;
         let new_list = PyList::empty(py);
         for item in list_obj {
-            new_list.append(process_recursive(py, &item, sensitive_set)?)?;
+            new_list.append(process_recursive(py, &item, sensitive_set, depth + 1, ancestors)?)?;
         }
         Ok(new_list.into())
-    } else {
-        if value.is_none() || value.is_instance_of::<PyBool>() || value.is_instance_of::<PyFloat>() || value.is_instance_of::<PyInt>() || value.is_instance_of::<PyString>() {
-            Ok(value.clone().unbind())
-        } else {
-            match value.str() {
-                Ok(s) => Ok(s.into()),
-                Err(_) => Ok(PyString::new(py, "[SERIALIZATION_ERROR]").into())
-            }
-        }
     }
 }
 
 #[pyfunction]
 fn mask_and_serialize(py: Python, data: &Bound<'_, PyAny>, sensitive_keys: Vec<String>) -> PyResult<PyObject> {
     let sensitive_set: HashSet<String> = sensitive_keys.into_iter().map(|s| s.to_lowercase()).collect();
-    process_recursive(py, data, &sensitive_set)
+    let mut ancestors = HashSet::new();
+    process_recursive(py, data, &sensitive_set, 0, &mut ancestors)
 }
 
 #[pymodule]
