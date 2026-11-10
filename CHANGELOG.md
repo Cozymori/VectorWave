@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Deep or self-referencing inputs crashed the whole process.** With
+  `capture_inputs=True` or `capture_return_value=True`, the Rust
+  serializer recursed without a limit, so a dict that contains itself
+  (or nesting thousands of levels deep) overflowed the native stack and
+  killed the traced app with a segfault. Self-references are now stored
+  as `"[CIRCULAR]"` and nesting past 64 levels as `"[MAX_DEPTH]"`.
+  Values shared by several keys, without a cycle, are still stored in full.
+
 - **Execution logs were lost when the process exited.** The Rust batch
   worker ignored items that were still buffered or queued when it
   received the shutdown signal. These were the calls from up to the last
